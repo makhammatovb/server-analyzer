@@ -21,7 +21,7 @@ func enrolAgent(t *testing.T, s *store.Store, secret string) string {
 	}
 	err = s.RecordEnrolment(ctx, store.Enrolment{
 		ServerID: srv.ID, Hostname: "host", AgentVersion: "0.1.0",
-		CertFingerprint: "fp", EnrolKeyHash: store.HashSecret(secret),
+		CertFingerprint: "fp", EnrolKeyHash: store.HashHighEntropySecret([]byte(secret)),
 		CertNotAfter: time.Now().Add(time.Hour),
 	})
 	if err != nil {
@@ -52,7 +52,7 @@ func TestRecordEnrolmentUpsertsOnServerID(t *testing.T) {
 	id := enrolAgent(t, s, "first")
 	err := s.RecordEnrolment(ctx, store.Enrolment{
 		ServerID: id, Hostname: "host2", AgentVersion: "0.2.0",
-		CertFingerprint: "fp2", EnrolKeyHash: store.HashSecret("second"),
+		CertFingerprint: "fp2", EnrolKeyHash: store.HashHighEntropySecret([]byte("second")),
 		CertNotAfter: time.Now().Add(time.Hour),
 	})
 	if err != nil {
@@ -135,5 +135,93 @@ func TestAppendAuditStoresDetailAsJSON(t *testing.T) {
 		`SELECT detail::text FROM audit_log WHERE target = $1 AND action = 'enrol-nil'`, target).
 		Scan(&nilDetail); err != nil || nilDetail != "{}" {
 		t.Fatalf("nil detail = %q, %v; want {}", nilDetail, err)
+	}
+}
+
+func revoke(t *testing.T, s *store.Store, id string) {
+	t.Helper()
+	if _, err := s.Pool().Exec(context.Background(),
+		`UPDATE agents SET revoked_at = now() WHERE server_id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func decommission(t *testing.T, s *store.Store, id string) {
+	t.Helper()
+	if _, err := s.Pool().Exec(context.Background(),
+		`UPDATE servers SET decommissioned_at = now() WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRevokedAgentIsRefused(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	id := enrolAgent(t, s, "k")
+	revoke(t, s, id)
+
+	if err := s.VerifyEnrolKey(ctx, id, "k"); !errors.Is(err, store.ErrEnrolKeyInvalid) {
+		t.Fatalf("verify err = %v, want ErrEnrolKeyInvalid", err)
+	}
+	if _, err := s.TouchHeartbeat(ctx, id, "v", "b", time.Now()); !errors.Is(err, store.ErrServerInactive) {
+		t.Fatalf("heartbeat err = %v, want ErrServerInactive", err)
+	}
+}
+
+func TestDecommissionedServerIsRefused(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	id := enrolAgent(t, s, "k")
+	tok, err := s.CreateEnrolToken(ctx, id, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decommission(t, s, id)
+
+	if err := s.VerifyEnrolKey(ctx, id, "k"); !errors.Is(err, store.ErrEnrolKeyInvalid) {
+		t.Fatalf("verify err = %v, want ErrEnrolKeyInvalid", err)
+	}
+	if _, err := s.TouchHeartbeat(ctx, id, "v", "b", now); !errors.Is(err, store.ErrServerInactive) {
+		t.Fatalf("heartbeat err = %v, want ErrServerInactive", err)
+	}
+	if _, err := s.ConsumeEnrolToken(ctx, tok, now); !errors.Is(err, store.ErrTokenInvalid) {
+		t.Fatalf("consume err = %v, want ErrTokenInvalid", err)
+	}
+}
+
+func TestRecordEnrolmentClearsRevocation(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	id := enrolAgent(t, s, "old")
+	revoke(t, s, id)
+	err := s.RecordEnrolment(ctx, store.Enrolment{
+		ServerID: id, Hostname: "h", AgentVersion: "1", CertFingerprint: "fp",
+		EnrolKeyHash: store.HashHighEntropySecret([]byte("new")), CertNotAfter: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.VerifyEnrolKey(ctx, id, "new"); err != nil {
+		t.Fatalf("verify after re-enrol: %v", err)
+	}
+	if _, err := s.TouchHeartbeat(ctx, id, "1", "b", time.Now()); err != nil {
+		t.Fatalf("heartbeat after re-enrol: %v", err)
+	}
+}
+
+func TestTouchHeartbeatKeepsVersionWhenEmpty(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	id := enrolAgent(t, s, "k")
+	if _, err := s.TouchHeartbeat(ctx, id, "", "b", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var ver string
+	if err := s.Pool().QueryRow(ctx, `SELECT agent_version FROM agents WHERE server_id = $1`, id).Scan(&ver); err != nil {
+		t.Fatal(err)
+	}
+	if ver != "0.1.0" {
+		t.Fatalf("agent_version = %q, want 0.1.0", ver)
 	}
 }

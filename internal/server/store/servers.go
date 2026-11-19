@@ -44,10 +44,11 @@ type ServerStatus struct {
 	CertNotAfter *time.Time
 }
 
-// HashSecret returns the SHA-256 of a high-entropy secret (enrolment token or
-// enrolment key). Callers building an Enrolment use it for EnrolKeyHash.
-func HashSecret(secret string) []byte {
-	sum := sha256.Sum256([]byte(secret))
+// HashHighEntropySecret returns the unsalted SHA-256 of a high-entropy random
+// secret (enrolment token or enrolment key). It is NOT suitable for passwords
+// or any low-entropy input. Callers building an Enrolment use it for EnrolKeyHash.
+func HashHighEntropySecret(secret []byte) []byte {
+	sum := sha256.Sum256(secret)
 	return sum[:]
 }
 
@@ -126,23 +127,26 @@ func (s *Store) CreateEnrolToken(ctx context.Context, serverID string, ttl time.
 	plaintext := base64.RawURLEncoding.EncodeToString(raw)
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO enrolment_tokens (token_hash, server_id, expires_at) VALUES ($1, $2, $3)`,
-		HashSecret(plaintext), serverID, now.Add(ttl))
+		HashHighEntropySecret([]byte(plaintext)), serverID, now.Add(ttl))
 	if err != nil {
 		return "", fmt.Errorf("store: create enrolment token: %w", err)
 	}
 	return plaintext, nil
 }
 
-// ConsumeEnrolToken marks the token consumed and returns its server ID. The
+// ConsumeEnrolToken marks the token consumed and returns its server ID. A token
+// for a decommissioned server is refused like any other invalid token. The
 // single-use guarantee comes from the conditional UPDATE: concurrent callers
 // serialise on the row lock and only one sees consumed_at IS NULL.
 func (s *Store) ConsumeEnrolToken(ctx context.Context, plaintext string, now time.Time) (string, error) {
 	var serverID string
 	err := s.pool.QueryRow(ctx,
-		`UPDATE enrolment_tokens SET consumed_at = $2
-		  WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > $2
-		  RETURNING server_id::text`,
-		HashSecret(plaintext), now).Scan(&serverID)
+		`UPDATE enrolment_tokens t SET consumed_at = $2
+		   FROM servers s
+		  WHERE s.id = t.server_id AND s.decommissioned_at IS NULL
+		    AND t.token_hash = $1 AND t.consumed_at IS NULL AND t.expires_at > $2
+		  RETURNING t.server_id::text`,
+		HashHighEntropySecret([]byte(plaintext)), now).Scan(&serverID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrTokenInvalid
 	}
