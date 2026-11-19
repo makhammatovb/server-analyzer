@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,26 +24,26 @@ import (
 const defaultConfigPath = "/etc/fleetguard/agent.yaml"
 
 func main() {
-	os.Exit(realMain(os.Args[1:]))
+	os.Exit(realMain(os.Args[1:], os.Stderr))
 }
 
-func realMain(args []string) int {
+func realMain(args []string, errw io.Writer) int {
 	if len(args) == 0 {
-		usage()
+		usage(errw)
 		return 2
 	}
 	var err error
 	switch args[0] {
 	case "enrol":
-		err = enrolCmd(args[1:])
+		err = enrolCmd(args[1:], errw)
 	case "run":
-		err = runCmd(args[1:])
+		err = runCmd(args[1:], errw)
 	case "-h", "--help", "help":
-		usage()
+		usage(errw)
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "fleetguard-agent: unknown command %q\n", args[0])
-		usage()
+		_, _ = fmt.Fprintf(errw, "fleetguard-agent: unknown command %q\n", args[0])
+		usage(errw)
 		return 2
 	}
 	switch {
@@ -51,13 +52,13 @@ func realMain(args []string) int {
 	case errors.Is(err, context.Canceled):
 		return 0 // stopped by a signal
 	default:
-		fmt.Fprintf(os.Stderr, "fleetguard-agent: %v\n", err)
+		_, _ = fmt.Fprintf(errw, "fleetguard-agent: %v\n", err)
 		return 1
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: fleetguard-agent enrol --token=<token> [--config=<path>]\n       fleetguard-agent run [--config=<path>]")
+func usage(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "usage: fleetguard-agent enrol --token=<token> [--config=<path>]\n       fleetguard-agent run [--config=<path>]")
 }
 
 func loadConfig(fs *flag.FlagSet, args []string) (agent.Config, error) {
@@ -74,8 +75,9 @@ func loadConfig(fs *flag.FlagSet, args []string) (agent.Config, error) {
 	return cfg, nil
 }
 
-func enrolCmd(args []string) error {
+func enrolCmd(args []string, errw io.Writer) error {
 	fs := flag.NewFlagSet("enrol", flag.ContinueOnError)
+	fs.SetOutput(errw)
 	token := fs.String("token", "", "one-time enrolment token from the server")
 	cfg, err := loadConfig(fs, args)
 	if err != nil {
@@ -102,8 +104,9 @@ func enrolCmd(args []string) error {
 	return nil
 }
 
-func runCmd(args []string) error {
+func runCmd(args []string, errw io.Writer) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(errw)
 	cfg, err := loadConfig(fs, args)
 	if err != nil {
 		return err

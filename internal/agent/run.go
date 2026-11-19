@@ -223,6 +223,14 @@ func (l *loop) tick(ctx context.Context) time.Duration {
 			// Revoked, decommissioned or still superseded: wait the longest
 			// interval, jittered so a fleet-wide event does not leave every
 			// agent in lockstep, and keep trying so the agent heals on its own.
+			//
+			// Reaching the maximum also re-arms re-enrol. If another holder of
+			// this server's credentials supersedes us after a successful
+			// re-enrol, retrying recovery is what stops this host sitting
+			// unmonitored behind the other's heartbeats. Two duplicates then
+			// re-enrol against each other every cycle, which is loud, where a
+			// latch would be silent.
+			l.reenrolled = false
 			return l.h.jitter(maxBackoff)
 		}
 	}

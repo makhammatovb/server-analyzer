@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,8 +35,12 @@ func TestRealMainExitCodes(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := realMain(c.args); got != c.want {
+			var errw bytes.Buffer
+			if got := realMain(c.args, &errw); got != c.want {
 				t.Errorf("realMain(%v) = %d, want %d", c.args, got, c.want)
+			}
+			if c.want != 0 && !strings.Contains(errw.String(), "fleetguard-agent") {
+				t.Errorf("a failing exit wrote no explanation to the error writer: %q", errw.String())
 			}
 		})
 	}

@@ -238,7 +238,7 @@ func TestRunReEnrolsOnlyOncePerFailureEpisode(t *testing.T) {
 	}
 }
 
-func TestRunOnForbiddenReEnrolsOnceThenBacksOffToMaximumAndKeepsRunning(t *testing.T) {
+func TestRunOnForbiddenReEnrolsOncePerBackoffCycleAndKeepsRunning(t *testing.T) {
 	re := newRunEnv(t)
 	re.enrol(t)
 	re.force(hbPath, func(int) int { return http.StatusForbidden })
@@ -247,8 +247,12 @@ func TestRunOnForbiddenReEnrolsOnceThenBacksOffToMaximumAndKeepsRunning(t *testi
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v: it must keep retrying, ending only on cancellation", err)
 	}
-	if got := re.count(rePath); got != 1 {
-		t.Errorf("re-enrol requests = %d, want 1", got)
+	// Each re-enrol succeeds and the 403 persists (another holder of the same
+	// credentials superseded us). Recovery must still be retried after every
+	// maximum wait, or the agent sits blind while the other holder's heartbeats
+	// keep the server looking healthy. 4 waits = the initial attempt + 3 retries.
+	if got := re.count(rePath); got != 4 {
+		t.Errorf("re-enrol requests = %d over 4 backoff cycles, want 4 (one per cycle, not one ever)", got)
 	}
 	for i, d := range waits {
 		if d != 5*time.Minute {
