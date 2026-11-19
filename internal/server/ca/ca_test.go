@@ -206,3 +206,38 @@ func TestFingerprintIsHexSHA256(t *testing.T) {
 		t.Fatalf("fingerprint length = %d, want 64", len(fp))
 	}
 }
+
+func TestCheckCSR(t *testing.T) {
+	good := newCSR(t)
+	csr, err := CheckCSR(good)
+	if err != nil || csr == nil || csr.PublicKey == nil {
+		t.Fatalf("valid CSR: %v, %v", csr, err)
+	}
+
+	block, _ := pem.Decode(good)
+	corrupt := *block
+	corrupt.Bytes = append([]byte(nil), block.Bytes...)
+	corrupt.Bytes[len(corrupt.Bytes)-1] ^= 0xff
+	wrongType := *block
+	wrongType.Type = "CERTIFICATE"
+
+	tests := map[string][]byte{
+		"not pem":           []byte("not pem"),
+		"wrong block type":  pem.EncodeToMemory(&wrongType),
+		"corrupt signature": pem.EncodeToMemory(&corrupt),
+	}
+	for name, in := range tests {
+		if _, err := CheckCSR(in); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
+func TestSignRejectsWrongPEMType(t *testing.T) {
+	c := newCA(t)
+	block, _ := pem.Decode(newCSR(t))
+	block.Type = "CERTIFICATE"
+	if _, err := c.Sign(pem.EncodeToMemory(block), testServerID, time.Hour, time.Now()); err == nil {
+		t.Fatal("Sign accepted a PEM block that is not a CERTIFICATE REQUEST")
+	}
+}

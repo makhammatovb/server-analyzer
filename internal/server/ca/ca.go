@@ -176,11 +176,14 @@ func (c *CA) Sign(csrPEM []byte, serverID string, ttl time.Duration, now time.Ti
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
-// issue signs a client certificate with the given Common Name and returns DER.
-func (c *CA) issue(csrPEM []byte, commonName string, ttl time.Duration, now time.Time) ([]byte, error) {
+// CheckCSR parses a PEM certificate signing request and verifies its
+// self-signature. issue runs exactly this check, and callers that must reject a
+// bad CSR before spending anything (such as a single-use token) call it too, so
+// the two can never disagree.
+func CheckCSR(csrPEM []byte) (*x509.CertificateRequest, error) {
 	block, _ := pem.Decode(csrPEM)
-	if block == nil {
-		return nil, errors.New("ca: no PEM CSR found")
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, errors.New("ca: no PEM CERTIFICATE REQUEST found")
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
@@ -188,6 +191,15 @@ func (c *CA) issue(csrPEM []byte, commonName string, ttl time.Duration, now time
 	}
 	if err := csr.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("ca: CSR signature: %w", err)
+	}
+	return csr, nil
+}
+
+// issue signs a client certificate with the given Common Name and returns DER.
+func (c *CA) issue(csrPEM []byte, commonName string, ttl time.Duration, now time.Time) ([]byte, error) {
+	csr, err := CheckCSR(csrPEM)
+	if err != nil {
+		return nil, err
 	}
 	serial, err := newSerial()
 	if err != nil {

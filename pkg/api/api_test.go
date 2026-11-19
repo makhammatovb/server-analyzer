@@ -29,6 +29,9 @@ func TestEnrolRequestValidate(t *testing.T) {
 		{"empty token", func(r *api.EnrolRequest) { r.Token = "" }, "Token"},
 		{"empty csr", func(r *api.EnrolRequest) { r.CSRPEM = nil }, "CSRPEM"},
 		{"empty hostname", func(r *api.EnrolRequest) { r.Hostname = "" }, "Hostname"},
+		{"oversized hostname", func(r *api.EnrolRequest) { r.Hostname = strings.Repeat("a", 254) }, "Hostname"},
+		{"hostname with space", func(r *api.EnrolRequest) { r.Hostname = "bad host" }, "Hostname"},
+		{"hostname with control char", func(r *api.EnrolRequest) { r.Hostname = "bad\nhost" }, "Hostname"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,5 +132,22 @@ func TestMaxBodyBytesIsSixtyFourKiB(t *testing.T) {
 func TestAgentCertHeader(t *testing.T) {
 	if api.AgentCertHeader != "X-Agent-Cert" {
 		t.Fatalf("AgentCertHeader = %q", api.AgentCertHeader)
+	}
+}
+
+func TestEnrolRequestAcceptsMaxLengthHostname(t *testing.T) {
+	r := api.EnrolRequest{Token: "t", CSRPEM: []byte("c"), Hostname: strings.Repeat("a", 253)}
+	if err := r.Validate(); err != nil {
+		t.Fatalf("253-byte hostname rejected: %v", err)
+	}
+}
+
+func TestEnrolResponseOmitsEmptyEnrolKey(t *testing.T) {
+	raw, err := json.Marshal(api.EnrolResponse{ServerID: "id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "enrol_key") {
+		t.Fatalf("empty EnrolKey must be omitted from the wire form, got %s", raw)
 	}
 }

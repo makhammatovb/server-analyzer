@@ -302,6 +302,41 @@ func TestEnrolRejectsMalformedCSRWithoutBurningToken(t *testing.T) {
 	}
 }
 
+func TestEnrolRejectsOversizedHostnameWithoutBurningToken(t *testing.T) {
+	e := newEnv(t)
+	_, token := e.newServerWithToken(t, time.Now())
+	resp := e.post(t, "/v1/enrol", api.EnrolRequest{
+		Token: token, CSRPEM: newCSR(t), Hostname: strings.Repeat("a", 254),
+	}, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if r, _ := e.enrol(t, token); r.StatusCode != http.StatusOK {
+		t.Fatalf("token burned by the oversized hostname: %d", r.StatusCode)
+	}
+}
+
+func TestRejectedEnrolAuditUsesConstantTarget(t *testing.T) {
+	e := newEnv(t)
+	hostname := "probe-" + uuid.NewString()
+	resp := e.post(t, "/v1/enrol", api.EnrolRequest{
+		Token: "no-such-token", CSRPEM: newCSR(t), Hostname: hostname,
+	}, true)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	var target, detail string
+	err := e.st.Pool().QueryRow(context.Background(),
+		`SELECT target, detail::text FROM audit_log
+		  WHERE action = 'agent.enrol_rejected' AND detail->>'hostname' = $1`, hostname).Scan(&target, &detail)
+	if err != nil {
+		t.Fatalf("rejected-enrol audit row not found with hostname in detail: %v", err)
+	}
+	if target != "unknown" {
+		t.Fatalf("target = %q, want the constant \"unknown\"", target)
+	}
+}
+
 func enrolled(t *testing.T, e *env) (serverID string, out api.EnrolResponse) {
 	t.Helper()
 	id, token := e.newServerWithToken(t, time.Now())

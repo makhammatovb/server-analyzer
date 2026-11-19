@@ -16,8 +16,9 @@ import (
 var ErrEnrolKeyInvalid = errors.New("store: enrolment key invalid")
 
 // ErrServerInactive is returned when the agent is revoked or its server is
-// decommissioned. It is distinguishable on purpose so callers can answer 403
-// and audit it.
+// decommissioned. It is distinguishable so callers can audit the real reason;
+// agent-facing handlers must still answer 401, not 403, so a caller cannot tell
+// a retired server from an unknown one.
 var ErrServerInactive = errors.New("store: agent revoked or server decommissioned")
 
 // Enrolment is the record written when an agent enrols.

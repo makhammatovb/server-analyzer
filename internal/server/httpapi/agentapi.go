@@ -21,6 +21,11 @@ const hostCertTTL = 90 * 24 * time.Hour
 
 const auditActor = "agent"
 
+// unknownTarget is the audit target for a rejected enrolment: no server has
+// been identified, and caller-supplied text must not become a target, which is
+// otherwise always a server ID.
+const unknownTarget = "unknown"
+
 type agentAPI struct {
 	st  *store.Store
 	ca  *ca.CA
@@ -65,24 +70,6 @@ func (a *agentAPI) signCert(csrPEM []byte, serverID string, now time.Time) (cert
 	return certPEM, a.ca.Fingerprint(block.Bytes), cert.NotAfter, nil
 }
 
-// checkCSR parses the CSR and verifies its self-signature. It needs no server
-// ID, so enrol runs it before the token is consumed and a corrupt CSR cannot
-// burn a single-use token.
-func checkCSR(csrPEM []byte) error {
-	block, _ := pem.Decode(csrPEM)
-	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return errors.New("csr is not a PEM CERTIFICATE REQUEST")
-	}
-	csr, err := x509.ParseCertificateRequest(block.Bytes)
-	if err != nil {
-		return fmt.Errorf("parse csr: %w", err)
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return fmt.Errorf("csr signature: %w", err)
-	}
-	return nil
-}
-
 func (a *agentAPI) enrol(w http.ResponseWriter, r *http.Request) {
 	var req api.EnrolRequest
 	if status := decodeBody(w, r, &req, a.lg); status != 0 {
@@ -94,7 +81,7 @@ func (a *agentAPI) enrol(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest)
 		return
 	}
-	if err := checkCSR(req.CSRPEM); err != nil {
+	if _, err := ca.CheckCSR(req.CSRPEM); err != nil {
 		a.lg.Info("httpapi: invalid enrol CSR", "hostname", req.Hostname, "err", err)
 		writeError(w, http.StatusBadRequest)
 		return
@@ -107,7 +94,10 @@ func (a *agentAPI) enrol(w http.ResponseWriter, r *http.Request) {
 		// one error, so the audit entry cannot say which; the caller learns
 		// less still. Never log the token itself.
 		a.lg.Warn("httpapi: enrolment token rejected", "hostname", req.Hostname)
-		a.audit(r, "agent.enrol_rejected", req.Hostname, map[string]string{"reason": "token invalid, expired, used or server decommissioned"})
+		a.audit(r, "agent.enrol_rejected", unknownTarget, map[string]string{
+			"reason":   "token invalid, expired, used or server decommissioned",
+			"hostname": req.Hostname, // already bounded by Validate
+		})
 		writeError(w, http.StatusUnauthorized)
 		return
 	}
@@ -170,7 +160,7 @@ func (a *agentAPI) reEnrol(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest)
 		return
 	}
-	if err := checkCSR(req.CSRPEM); err != nil {
+	if _, err := ca.CheckCSR(req.CSRPEM); err != nil {
 		a.lg.Info("httpapi: invalid re-enrol CSR", "server_id", req.ServerID, "err", err)
 		writeError(w, http.StatusBadRequest)
 		return

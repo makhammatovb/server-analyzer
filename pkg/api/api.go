@@ -31,13 +31,13 @@ type EnrolResponse struct {
 	ServerID string `json:"server_id"`
 	CertPEM  []byte `json:"cert_pem"`
 	CAPEM    []byte `json:"ca_pem"`
-	EnrolKey string `json:"enrol_key"`
+	EnrolKey string `json:"enrol_key,omitempty"`
 }
 
 // ReEnrolRequest asks for a fresh certificate for an already enrolled agent.
 type ReEnrolRequest struct {
 	ServerID string `json:"server_id"`
-	EnrolKey string `json:"enrol_key"`
+	EnrolKey string `json:"enrol_key,omitempty"`
 	CSRPEM   []byte `json:"csr_pem"`
 }
 
@@ -63,8 +63,28 @@ func (r EnrolRequest) Validate() error {
 		return errors.New("field Token is required")
 	case len(r.CSRPEM) == 0:
 		return errors.New("field CSRPEM is required")
-	case r.Hostname == "":
+	}
+	return validateHostname(r.Hostname)
+}
+
+// maxHostnameBytes is the DNS name limit.
+const maxHostnameBytes = 253
+
+// validateHostname bounds the hostname and restricts it to the characters a
+// DNS name can contain, so it is safe to store and log.
+func validateHostname(h string) error {
+	if h == "" {
 		return errors.New("field Hostname is required")
+	}
+	if len(h) > maxHostnameBytes {
+		return fmt.Errorf("field Hostname exceeds %d bytes", maxHostnameBytes)
+	}
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_'
+		if !ok {
+			return errors.New("field Hostname contains characters outside [A-Za-z0-9._-]")
+		}
 	}
 	return nil
 }
