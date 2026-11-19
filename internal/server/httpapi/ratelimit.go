@@ -12,7 +12,13 @@ type RateLimiter struct {
 	capacity float64
 	perSec   float64
 	buckets  map[string]*bucket
+	// lastSweep is when idle buckets were last evicted.
+	lastSweep time.Time
 }
+
+// sweepInterval is both how often idle buckets are evicted and how long a
+// bucket must have been idle to qualify.
+const sweepInterval = time.Minute
 
 type bucket struct {
 	tokens float64
@@ -33,6 +39,7 @@ func NewRateLimiter(perMinute int) *RateLimiter {
 func (l *RateLimiter) Allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.sweep(now)
 	b, ok := l.buckets[key]
 	if !ok {
 		b = &bucket{tokens: l.capacity, last: now}
@@ -47,4 +54,31 @@ func (l *RateLimiter) Allow(key string, now time.Time) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// Len reports how many keys currently hold a bucket.
+func (l *RateLimiter) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
+}
+
+// sweep drops buckets that have been idle for at least sweepInterval and would
+// by now be back at full tokens: forgetting them changes no decision, and it
+// bounds the map against callers that rotate keys. The caller holds l.mu.
+func (l *RateLimiter) sweep(now time.Time) {
+	if l.lastSweep.IsZero() {
+		l.lastSweep = now
+		return
+	}
+	if now.Sub(l.lastSweep) < sweepInterval {
+		return
+	}
+	l.lastSweep = now
+	for k, b := range l.buckets {
+		idle := now.Sub(b.last)
+		if idle >= sweepInterval && b.tokens+idle.Seconds()*l.perSec >= l.capacity {
+			delete(l.buckets, k)
+		}
+	}
 }

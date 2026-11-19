@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -41,6 +43,7 @@ type authAPI struct {
 	lg           *slog.Logger
 	now          func() time.Time
 	origin       string
+	proxySecret  string
 	loginByUser  *RateLimiter
 	loginByIP    *RateLimiter
 	registerByIP *RateLimiter
@@ -49,15 +52,16 @@ type authAPI struct {
 // NewAdminRouter serves the human-facing API: registration, sign-in and user
 // administration. baseURL is the public origin of the dashboard; browsers
 // sending a different Origin on a state-changing request are refused.
-func NewAdminRouter(st *store.Store, svc *auth.Service, baseURL string) http.Handler {
-	return NewAdminRouterAt(st, svc, baseURL, slog.Default(), time.Now)
+func NewAdminRouter(st *store.Store, svc *auth.Service, baseURL, proxySecret string) http.Handler {
+	return NewAdminRouterAt(st, svc, baseURL, proxySecret, slog.Default(), time.Now)
 }
 
 // NewAdminRouterAt is NewAdminRouter with an injectable logger and clock.
-func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL string, lg *slog.Logger, now func() time.Time) http.Handler {
+func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL, proxySecret string, lg *slog.Logger, now func() time.Time) http.Handler {
 	a := &authAPI{
 		st: st, svc: svc, lg: lg, now: now,
 		origin:       strings.TrimRight(baseURL, "/"),
+		proxySecret:  proxySecret,
 		loginByUser:  NewRateLimiter(attemptsPerMinute),
 		loginByIP:    NewRateLimiter(attemptsPerMinute),
 		registerByIP: NewRateLimiter(attemptsPerMinute),
@@ -70,7 +74,7 @@ func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL string, lg *sl
 	mux.Handle("GET /api/me", requireUser(http.HandlerFunc(a.me)))
 	mux.Handle("GET /api/users", requireUser(RequireAdmin(http.HandlerFunc(a.listUsers))))
 	mux.Handle("POST /api/users/{id}/activate", requireUser(RequireAdmin(http.HandlerFunc(a.activate))))
-	return a.sameOrigin(mux)
+	return RequireProxySecret(proxySecret)(a.sameOrigin(mux))
 }
 
 // sameOrigin refuses a state-changing request whose Origin header names another
@@ -136,11 +140,20 @@ type credentials struct {
 	Password string `json:"password"`
 }
 
-// sourceIP is the peer address. Behind a reverse proxy this is the proxy's
-// address unless the deployment makes the proxy the only peer and rewrites it;
-// it is deliberately not read from X-Forwarded-For, which a client can forge to
-// sidestep the limit.
-func sourceIP(r *http.Request) string {
+// RealIPHeader carries the client address the reverse proxy observed.
+const RealIPHeader = "X-Real-IP"
+
+// clientIP is the address to rate limit. When the request carries the proxy
+// secret, the proxy is the peer and has set X-Real-IP from the connection's
+// remote host, a value the client cannot influence (unlike X-Forwarded-For), so
+// it is used. Otherwise, or if the header is missing or not an address, the
+// peer address is used, so a direct caller is still limited by its own address.
+func clientIP(r *http.Request, secret string) string {
+	if secret != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get(ProxyAuthHeader)), []byte(secret)) == 1 {
+		if ip, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get(RealIPHeader))); err == nil {
+			return ip.String()
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -149,7 +162,7 @@ func sourceIP(r *http.Request) string {
 }
 
 func (a *authAPI) register(w http.ResponseWriter, r *http.Request) {
-	if !a.registerByIP.Allow(sourceIP(r), a.now()) {
+	if !a.registerByIP.Allow(clientIP(r, a.proxySecret), a.now()) {
 		writeError(w, http.StatusTooManyRequests)
 		return
 	}
@@ -162,6 +175,9 @@ func (a *authAPI) register(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, auth.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest)
+	case errors.Is(err, auth.ErrBusy):
+		a.lg.Warn("httpapi: register refused, hashing slots busy")
+		writeError(w, http.StatusServiceUnavailable)
 	case err != nil:
 		a.lg.Error("httpapi: register failed", "err", err)
 		writeError(w, http.StatusInternalServerError)
@@ -185,16 +201,21 @@ func (a *authAPI) login(w http.ResponseWriter, r *http.Request) {
 	// Spend both buckets before deciding, so a denial on one does not let an
 	// attacker probe the other for free.
 	byUser := a.loginByUser.Allow(key, now)
-	byIP := a.loginByIP.Allow(sourceIP(r), now)
+	byIP := a.loginByIP.Allow(clientIP(r, a.proxySecret), now)
 	if !byUser || !byIP {
-		a.lg.Warn("httpapi: login rate limited", "ip", sourceIP(r), "by_user", !byUser, "by_ip", !byIP)
+		a.lg.Warn("httpapi: login rate limited", "ip", clientIP(r, a.proxySecret), "by_user", !byUser, "by_ip", !byIP)
 		writeError(w, http.StatusTooManyRequests)
 		return
 	}
 	token, err := a.svc.Login(r.Context(), c.Username, c.Password, now)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
-		a.lg.Info("httpapi: login failed", "ip", sourceIP(r))
+		a.lg.Info("httpapi: login failed", "ip", clientIP(r, a.proxySecret))
 		writeError(w, http.StatusUnauthorized)
+		return
+	}
+	if errors.Is(err, auth.ErrBusy) {
+		a.lg.Warn("httpapi: login refused, hashing slots busy")
+		writeError(w, http.StatusServiceUnavailable)
 		return
 	}
 	if err != nil {

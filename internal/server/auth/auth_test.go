@@ -342,3 +342,32 @@ func TestBootstrapOnlyWhenNoAdminsExist(t *testing.T) {
 		t.Fatalf("Session = %+v, %v", u, err)
 	}
 }
+
+func TestHashingBeyondTheConcurrencyCapIsRefused(t *testing.T) {
+	st := store.NewTestDB(t)
+	svc := auth.New(st, auth.WithMaxConcurrentHashes(1))
+	ctx := context.Background()
+	release := svc.HoldSlotForTest()
+
+	done := make(chan error, 3)
+	go func() { // unknown user: the dummy-hash path must be inside the cap too
+		_, err := svc.Login(ctx, uname(), goodPassword, time.Now())
+		done <- err
+	}()
+	go func() { done <- svc.Register(ctx, uname(), goodPassword) }()
+	go func() { done <- svc.Bootstrap(ctx, uname(), goodPassword) }()
+	for range 3 {
+		select {
+		case err := <-done:
+			if !errors.Is(err, auth.ErrBusy) {
+				t.Fatalf("err = %v, want ErrBusy", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("operation blocked instead of being refused")
+		}
+	}
+	release()
+	if err := svc.Register(ctx, uname(), goodPassword); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}

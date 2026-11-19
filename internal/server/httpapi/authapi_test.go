@@ -37,7 +37,7 @@ func newAdminEnv(t *testing.T) *adminEnv {
 	svc := auth.New(st)
 	e := &adminEnv{st: st, svc: svc, now: time.Now()}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e.h = httpapi.NewAdminRouterAt(st, svc, baseURL, lg, func() time.Time { return e.now })
+	e.h = httpapi.NewAdminRouterAt(st, svc, baseURL, proxySecret, lg, func() time.Time { return e.now })
 	return e
 }
 
@@ -50,6 +50,7 @@ func (e *adminEnv) do(method, path, body, cookie, remote string, hdr ...string) 
 	if cookie != "" {
 		r.AddCookie(&http.Cookie{Name: "fg_session", Value: cookie}) //nolint:gosec // request cookie in a test client
 	}
+	r.Header.Set(httpapi.ProxyAuthHeader, proxySecret)
 	for i := 0; i+1 < len(hdr); i += 2 {
 		r.Header.Set(hdr[i], hdr[i+1])
 	}
@@ -340,5 +341,74 @@ func TestStateChangingRequestsRejectForeignOrigin(t *testing.T) {
 	}
 	if w := e.do("POST", "/api/logout", "", ck, "", "Origin", baseURL); w.Code != 204 {
 		t.Fatalf("same origin = %d, want 204", w.Code)
+	}
+}
+
+func TestAdminAPIRequiresProxySecret(t *testing.T) {
+	e := newAdminEnv(t)
+	name, _ := e.makeUser(t, "user")
+	for _, secret := range []string{"", "wrong-secret"} {
+		for _, rt := range [][2]string{
+			{"POST", "/api/login"}, {"POST", "/api/register"}, {"GET", "/api/me"},
+			{"GET", "/api/users"}, {"POST", "/api/logout"},
+		} {
+			w := e.do(rt[0], rt[1], creds(name, userPW), "", "", httpapi.ProxyAuthHeader, secret)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("%s %s with secret %q = %d, want 401", rt[0], rt[1], secret, w.Code)
+			}
+		}
+	}
+}
+
+func TestClientAddressComesFromXRealIP(t *testing.T) {
+	e := newAdminEnv(t)
+	attempt := func(realIP string) int {
+		return e.do("POST", "/api/login", creds("u-"+uuid.NewString(), "wrong password!!"), "",
+			"192.0.2.50:1", "X-Real-IP", realIP).Code
+	}
+	for i := 1; i <= 10; i++ {
+		if c := attempt("198.51.100.1"); c != 401 {
+			t.Fatalf("attempt %d = %d, want 401", i, c)
+		}
+	}
+	if c := attempt("198.51.100.1"); c != 429 {
+		t.Fatalf("11th attempt from one X-Real-IP = %d, want 429", c)
+	}
+	// Same proxy peer, different browser: a separate bucket.
+	if c := attempt("198.51.100.2"); c != 401 {
+		t.Fatalf("different X-Real-IP = %d, want 401 (browsers must not share a bucket)", c)
+	}
+}
+
+func TestBusyHashingReturns503(t *testing.T) {
+	st := store.NewTestDB(t)
+	svc := auth.New(st, auth.WithMaxConcurrentHashes(1))
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h := httpapi.NewAdminRouterAt(st, svc, baseURL, proxySecret, lg, time.Now)
+
+	const n = 8
+	codes := make(chan int, n)
+	for i := range n {
+		go func() {
+			r := httptest.NewRequest("POST", "/api/login", strings.NewReader(creds("u-"+uuid.NewString(), "wrong password!!")))
+			r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1", i+1)
+			r.Header.Set(httpapi.ProxyAuthHeader, proxySecret)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			codes <- w.Code
+		}()
+	}
+	busy := 0
+	for range n {
+		switch c := <-codes; c {
+		case 503:
+			busy++
+		case 401:
+		default:
+			t.Fatalf("unexpected status %d", c)
+		}
+	}
+	if busy == 0 {
+		t.Fatal("no request was refused with 503 while one hashing slot served eight concurrent logins")
 	}
 }

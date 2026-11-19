@@ -64,21 +64,70 @@ const (
 	argonKeyLen    = 32
 )
 
+// ErrBusy is returned when every password-hashing slot is in use.
+var ErrBusy = errors.New("auth: too many concurrent password operations")
+
+// acquire takes a hashing slot without waiting. Each argon2 run holds 64 MiB,
+// so unauthenticated callers must not be able to run an unbounded number at
+// once, and queueing would only turn memory exhaustion into goroutine
+// exhaustion: when every slot is busy the caller is refused with ErrBusy.
+func (s *Service) acquire() (release func(), err error) {
+	select {
+	case s.slots <- struct{}{}:
+		return func() { <-s.slots }, nil
+	default:
+		return nil, ErrBusy
+	}
+}
+
+// hash hashes a password inside a slot.
+func (s *Service) hash(password string) (string, error) {
+	release, err := s.acquire()
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	return hashPassword(password)
+}
+
+// verify checks a password inside a slot.
+func (s *Service) verify(password, encoded string) (bool, error) {
+	release, err := s.acquire()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return verifyPassword(password, encoded), nil
+}
+
+// Option configures a Service.
+type Option func(*Service)
+
+// WithMaxConcurrentHashes caps simultaneous argon2 operations.
+func WithMaxConcurrentHashes(n int) Option {
+	return func(s *Service) { s.slots = make(chan struct{}, n) }
+}
+
 // Service is the authentication service.
 type Service struct {
-	st *store.Store
+	st    *store.Store
+	slots chan struct{}
 	// dummyHash is verified against when the username is unknown, so that path
 	// does the same hashing work as a real one.
 	dummyHash string
 }
 
 // New returns a Service backed by st.
-func New(st *store.Store) *Service {
+func New(st *store.Store, opts ...Option) *Service {
 	dummy, err := hashPassword("fleetguard dummy password for unknown users")
 	if err != nil {
 		panic(fmt.Sprintf("auth: cannot hash dummy password: %v", err))
 	}
-	return &Service{st: st, dummyHash: dummy}
+	svc := &Service{st: st, dummyHash: dummy, slots: make(chan struct{}, 4)}
+	for _, o := range opts {
+		o(svc)
+	}
+	return svc
 }
 
 func normalizeUsername(u string) string { return strings.ToLower(strings.TrimSpace(u)) }
@@ -102,7 +151,7 @@ func (s *Service) Register(ctx context.Context, username, password string) error
 	if err := validate(username, password); err != nil {
 		return err
 	}
-	hash, err := hashPassword(password)
+	hash, err := s.hash(password)
 	if err != nil {
 		return err
 	}
@@ -145,7 +194,10 @@ func (s *Service) Login(ctx context.Context, username, password string, now time
 	if !known {
 		hash = s.dummyHash
 	}
-	ok := verifyPassword(password, hash)
+	ok, err := s.verify(password, hash)
+	if err != nil {
+		return "", err
+	}
 	if !known || !ok || !user.IsActive {
 		return "", ErrInvalidCredentials
 	}
@@ -194,7 +246,7 @@ func (s *Service) Bootstrap(ctx context.Context, username, password string) erro
 	if err := validate(username, password); err != nil {
 		return err
 	}
-	hash, err := hashPassword(password)
+	hash, err := s.hash(password)
 	if err != nil {
 		return err
 	}
