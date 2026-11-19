@@ -3,11 +3,27 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/makhammatovb/fleetguard/internal/server/store"
 )
+
+// TestMain terminates the shared container once, after every test has run.
+// Termination happens before os.Exit (which skips defers) and the exit code
+// from m.Run() is preserved even when tests fail.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if err := store.TerminateTestDB(); err != nil {
+		fmt.Fprintf(os.Stderr, "terminate test database: %v\n", err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
 
 func TestMigrateCreatesEveryTable(t *testing.T) {
 	s := store.NewTestDB(t)
