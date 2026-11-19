@@ -46,3 +46,14 @@ describe('api client', () => {
     await expect(api('/api/logout', { method: 'POST' })).resolves.toBeUndefined()
   })
 })
+
+test('without an installed handler a 401 is loud, not silent', async () => {
+  vi.resetModules()
+  const fresh = await import('./client') // module state is back to its default
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+  server.use(http.get('*/api/me', () => new HttpResponse(null, { status: 401 })))
+
+  await expect(fresh.api('/api/me')).rejects.toMatchObject({ status: 401 })
+  expect(err).toHaveBeenCalledWith(expect.stringMatching(/session-expiry handler.*never installed/i))
+  err.mockRestore()
+})

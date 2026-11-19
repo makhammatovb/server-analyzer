@@ -11,7 +11,11 @@ export class ApiError extends Error {
   }
 }
 
-let onUnauthorized: () => void = () => {}
+// The default is loud on purpose: if main.tsx never installs the real handler, a
+// 401 must announce that wiring bug rather than look like a network failure.
+let onUnauthorized: () => void = () => {
+  console.error('api client: a 401 arrived but the session-expiry handler was never installed (see installSessionExpiry)')
+}
 
 // A 401 on any request means the session is gone. main.tsx installs the handler
 // that clears client state and goes to /login; screens do not handle it.
