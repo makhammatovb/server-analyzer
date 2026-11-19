@@ -26,11 +26,19 @@ const auditActor = "agent"
 // otherwise always a server ID.
 const unknownTarget = "unknown"
 
+// heartbeatsPerMinute is the per-server rate limit: generous against the
+// 2/min an agent actually sends.
+const heartbeatsPerMinute = 60
+
+// pollIntervalSec is how often agents are told to heartbeat.
+const pollIntervalSec = 30
+
 type agentAPI struct {
-	st  *store.Store
-	ca  *ca.CA
-	lg  *slog.Logger
-	now func() time.Time
+	st      *store.Store
+	ca      *ca.CA
+	lg      *slog.Logger
+	now     func() time.Time
+	limiter *RateLimiter
 }
 
 // NewAgentRouter serves the agent-facing API. Every /v1/* route requires the
@@ -39,10 +47,21 @@ type agentAPI struct {
 // while its server was off must still be able to re-enrol. They are
 // authenticated by the single-use token and the enrolment secret respectively.
 func NewAgentRouter(st *store.Store, authority *ca.CA, proxySecret string, lg *slog.Logger) http.Handler {
-	a := &agentAPI{st: st, ca: authority, lg: lg, now: time.Now}
+	return NewAgentRouterAt(st, authority, proxySecret, lg, time.Now)
+}
+
+// NewAgentRouterAt is NewAgentRouter with an injectable clock.
+//
+// /v1/heartbeat additionally requires a client certificate (AgentAuth), that
+// certificate to be the one currently on record, and stays within the
+// per-server rate limit.
+func NewAgentRouterAt(st *store.Store, authority *ca.CA, proxySecret string, lg *slog.Logger, now func() time.Time) http.Handler {
+	a := &agentAPI{st: st, ca: authority, lg: lg, now: now, limiter: NewRateLimiter(heartbeatsPerMinute)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrol", a.enrol)
 	mux.HandleFunc("POST /v1/re-enrol", a.reEnrol)
+	mux.Handle("POST /v1/heartbeat",
+		AgentAuth(authority, now)(a.requireCurrentCert(a.rateLimit(http.HandlerFunc(a.heartbeat)))))
 	return RequireProxySecret(proxySecret)(mux)
 }
 

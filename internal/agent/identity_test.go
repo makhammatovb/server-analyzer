@@ -52,7 +52,7 @@ func newEnv(t *testing.T) *env {
 	pki := NewPKI(t)
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router := httpapi.NewAgentRouter(st, pki.CA, proxySecret, lg)
-	url := NewTestProxy(t, pki, proxySecret, HeartbeatBackend(pki.CA, router))
+	url := NewTestProxy(t, pki, proxySecret, router)
 	cfg := agent.Config{
 		ServerURL:    url,
 		StateDir:     filepath.Join(t.TempDir(), "state"),

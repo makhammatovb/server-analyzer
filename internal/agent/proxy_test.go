@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"io"
 	"log"
@@ -129,25 +128,4 @@ func NewTestProxy(t *testing.T, pki *PKI, proxySecret string, backend http.Handl
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv.URL
-}
-
-// HeartbeatBackend wraps the agent router with a stub POST /v1/heartbeat that
-// answers 200 when X-Agent-Cert verifies against authority, 401 otherwise.
-func HeartbeatBackend(authority *ca.CA, router http.Handler) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		der, err := base64.StdEncoding.DecodeString(r.Header.Get(api.AgentCertHeader))
-		if err != nil || len(der) == 0 {
-			http.Error(w, "no certificate", http.StatusUnauthorized)
-			return
-		}
-		if _, err := authority.Verify(der, time.Now()); err != nil {
-			http.Error(w, "bad certificate", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.HeartbeatResponse{ConfigVersion: 1, PollIntervalSec: 30})
-	})
-	mux.Handle("/", router)
-	return mux
 }

@@ -146,3 +146,23 @@ func (s *Store) RecordCertRotation(ctx context.Context, serverID, certFingerprin
 	}
 	return ErrNotFound
 }
+
+// CertFingerprint returns the fingerprint of the certificate currently issued
+// to the server's agent. It returns ErrNotFound when the server has no agent
+// row. It deliberately ignores revocation: the caller learns the real reason
+// from TouchHeartbeat.
+func (s *Store) CertFingerprint(ctx context.Context, serverID string) (string, error) {
+	if _, err := uuid.Parse(serverID); err != nil {
+		return "", ErrNotFound
+	}
+	var fp string
+	err := s.pool.QueryRow(ctx,
+		`SELECT cert_fingerprint FROM agents WHERE server_id = $1`, serverID).Scan(&fp)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: cert fingerprint: %w", err)
+	}
+	return fp, nil
+}

@@ -289,3 +289,19 @@ func TestRecordCertRotationRefusesInactive(t *testing.T) {
 		}
 	}
 }
+
+func TestCertFingerprintReturnsStoredValue(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	id := enrolAgent(t, s, "secret")
+	got, err := s.CertFingerprint(ctx, id)
+	if err != nil || got != "fp" {
+		t.Fatalf("CertFingerprint = %q, %v; want \"fp\"", got, err)
+	}
+	if _, err := s.CertFingerprint(ctx, uuid.NewString()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown server err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.CertFingerprint(ctx, "not-a-uuid"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("bad id err = %v, want ErrNotFound", err)
+	}
+}
