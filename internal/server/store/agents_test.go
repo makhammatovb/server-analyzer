@@ -225,3 +225,67 @@ func TestTouchHeartbeatKeepsVersionWhenEmpty(t *testing.T) {
 		t.Fatalf("agent_version = %q, want 0.1.0", ver)
 	}
 }
+
+func TestRecordCertRotationUpdatesOnlyCertColumns(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	id := enrolAgent(t, s, "rot")
+	notAfter := time.Now().Add(90 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+
+	if err := s.RecordCertRotation(ctx, id, "fp-new", notAfter); err != nil {
+		t.Fatalf("RecordCertRotation: %v", err)
+	}
+	var fp, host, version string
+	var got time.Time
+	err := s.Pool().QueryRow(ctx,
+		`SELECT cert_fingerprint, cert_not_after, hostname, agent_version FROM agents WHERE server_id = $1`, id).
+		Scan(&fp, &got, &host, &version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp != "fp-new" || !got.Equal(notAfter) {
+		t.Fatalf("fingerprint/not_after = %q, %v; want fp-new, %v", fp, got, notAfter)
+	}
+	if host != "host" || version != "0.1.0" {
+		t.Fatalf("other columns changed: %q %q", host, version)
+	}
+	if err := s.VerifyEnrolKey(ctx, id, "rot"); err != nil {
+		t.Fatalf("enrol key changed: %v", err)
+	}
+}
+
+func TestRecordCertRotationNotFound(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	if err := s.RecordCertRotation(ctx, uuid.NewString(), "fp", time.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown server err = %v, want ErrNotFound", err)
+	}
+	srv, err := s.CreateServer(ctx, uniqueName("noagent"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordCertRotation(ctx, srv.ID, "fp", time.Now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("no agent row err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRecordCertRotationRefusesInactive(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	for name, deactivate := range map[string]func(*testing.T, *store.Store, string){
+		"revoked": revoke, "decommissioned": decommission,
+	} {
+		id := enrolAgent(t, s, "x")
+		deactivate(t, s, id)
+		if err := s.RecordCertRotation(ctx, id, "fp-new", time.Now()); !errors.Is(err, store.ErrServerInactive) {
+			t.Fatalf("%s err = %v, want ErrServerInactive", name, err)
+		}
+		var fp string
+		if err := s.Pool().QueryRow(ctx, `SELECT cert_fingerprint FROM agents WHERE server_id = $1`, id).Scan(&fp); err != nil {
+			t.Fatal(err)
+		}
+		if fp != "fp" {
+			t.Fatalf("%s: fingerprint rotated to %q", name, fp)
+		}
+	}
+}

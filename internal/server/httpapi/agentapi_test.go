@@ -278,6 +278,30 @@ func TestEnrolRejectsMissingProxySecret(t *testing.T) {
 	_ = serverID
 }
 
+func TestEnrolRejectsMalformedCSRWithoutBurningToken(t *testing.T) {
+	e := newEnv(t)
+	serverID, token := e.newServerWithToken(t, time.Now())
+	resp := e.post(t, "/v1/enrol", api.EnrolRequest{
+		Token: token, CSRPEM: []byte("not a csr"), Hostname: "h",
+	}, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	// A CSR with a corrupted signature is rejected the same way.
+	good := newCSR(t)
+	block, _ := pem.Decode(good)
+	block.Bytes[len(block.Bytes)-1] ^= 0xff
+	resp = e.post(t, "/v1/enrol", api.EnrolRequest{
+		Token: token, CSRPEM: pem.EncodeToMemory(block), Hostname: "h",
+	}, true)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("corrupt-signature status = %d, want 400", resp.StatusCode)
+	}
+	if r, out := e.enrol(t, token); r.StatusCode != http.StatusOK || out.ServerID != serverID {
+		t.Fatalf("token was burned by the malformed CSR: status %d", r.StatusCode)
+	}
+}
+
 func enrolled(t *testing.T, e *env) (serverID string, out api.EnrolResponse) {
 	t.Helper()
 	id, token := e.newServerWithToken(t, time.Now())
@@ -322,6 +346,18 @@ func TestReEnrolWithValidSecretIssuesNewCert(t *testing.T) {
 	}
 	if countAudit(t, e, "agent.re-enrolled", id) != 1 {
 		t.Fatal("agent.re-enrolled not audited")
+	}
+	var fp string
+	var notAfter time.Time
+	if err := e.st.Pool().QueryRow(context.Background(),
+		`SELECT cert_fingerprint, cert_not_after FROM agents WHERE server_id = $1`, id).Scan(&fp, &notAfter); err != nil {
+		t.Fatal(err)
+	}
+	if fp != newFP {
+		t.Fatalf("stored fingerprint = %q, want the re-issued %q", fp, newFP)
+	}
+	if want := time.Now().Add(89 * 24 * time.Hour); notAfter.Before(want) {
+		t.Fatalf("stored cert_not_after = %v, want about 90 days out", notAfter)
 	}
 	// The secret keeps working: re-enrolment must not consume or change it.
 	if err := e.st.VerifyEnrolKey(context.Background(), id, first.EnrolKey); err != nil {

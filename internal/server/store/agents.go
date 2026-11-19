@@ -114,3 +114,34 @@ func (s *Store) TouchHeartbeat(ctx context.Context, serverID, agentVersion, boot
 	}
 	return previous != "" && bootID != "" && previous != bootID, nil
 }
+
+// RecordCertRotation stores the fingerprint and expiry of a freshly issued
+// certificate for an already enrolled agent, leaving every other column alone.
+// It returns ErrNotFound when the server has no agent row, and ErrServerInactive
+// for a revoked agent or decommissioned server, which must not be rotated.
+func (s *Store) RecordCertRotation(ctx context.Context, serverID, certFingerprint string, notAfter time.Time) error {
+	if _, err := uuid.Parse(serverID); err != nil {
+		return ErrNotFound
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE agents a SET cert_fingerprint = $2, cert_not_after = $3
+		   FROM servers s
+		  WHERE s.id = a.server_id AND a.server_id = $1
+		    AND a.revoked_at IS NULL AND s.decommissioned_at IS NULL`,
+		serverID, certFingerprint, notAfter)
+	if err != nil {
+		return fmt.Errorf("store: record cert rotation: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM agents WHERE server_id = $1)`, serverID).Scan(&exists); err != nil {
+		return fmt.Errorf("store: record cert rotation: %w", err)
+	}
+	if exists {
+		return ErrServerInactive
+	}
+	return ErrNotFound
+}

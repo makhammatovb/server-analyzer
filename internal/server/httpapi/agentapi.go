@@ -65,6 +65,24 @@ func (a *agentAPI) signCert(csrPEM []byte, serverID string, now time.Time) (cert
 	return certPEM, a.ca.Fingerprint(block.Bytes), cert.NotAfter, nil
 }
 
+// checkCSR parses the CSR and verifies its self-signature. It needs no server
+// ID, so enrol runs it before the token is consumed and a corrupt CSR cannot
+// burn a single-use token.
+func checkCSR(csrPEM []byte) error {
+	block, _ := pem.Decode(csrPEM)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return errors.New("csr is not a PEM CERTIFICATE REQUEST")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse csr: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return fmt.Errorf("csr signature: %w", err)
+	}
+	return nil
+}
+
 func (a *agentAPI) enrol(w http.ResponseWriter, r *http.Request) {
 	var req api.EnrolRequest
 	if status := decodeBody(w, r, &req, a.lg); status != 0 {
@@ -73,6 +91,11 @@ func (a *agentAPI) enrol(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := req.Validate(); err != nil {
 		a.lg.Info("httpapi: invalid enrol request", "err", err)
+		writeError(w, http.StatusBadRequest)
+		return
+	}
+	if err := checkCSR(req.CSRPEM); err != nil {
+		a.lg.Info("httpapi: invalid enrol CSR", "hostname", req.Hostname, "err", err)
 		writeError(w, http.StatusBadRequest)
 		return
 	}
@@ -96,7 +119,8 @@ func (a *agentAPI) enrol(w http.ResponseWriter, r *http.Request) {
 
 	certPEM, fingerprint, notAfter, err := a.signCert(req.CSRPEM, serverID, now)
 	if err != nil {
-		// The token is already spent; an admin must issue a new one.
+		// Only exceptional failures reach here (checkCSR passed); the token is
+		// spent, so an admin issues a new one.
 		a.lg.Warn("httpapi: signing enrolment CSR failed", "server_id", serverID, "err", err)
 		a.audit(r, "agent.enrol_rejected", serverID, map[string]string{"reason": "csr rejected: " + err.Error()})
 		writeError(w, http.StatusBadRequest)
@@ -146,6 +170,11 @@ func (a *agentAPI) reEnrol(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest)
 		return
 	}
+	if err := checkCSR(req.CSRPEM); err != nil {
+		a.lg.Info("httpapi: invalid re-enrol CSR", "server_id", req.ServerID, "err", err)
+		writeError(w, http.StatusBadRequest)
+		return
+	}
 	now := a.now().UTC()
 
 	err := a.st.VerifyEnrolKey(r.Context(), req.ServerID, req.EnrolKey)
@@ -161,11 +190,24 @@ func (a *agentAPI) reEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certPEM, fingerprint, _, err := a.signCert(req.CSRPEM, req.ServerID, now)
+	certPEM, fingerprint, notAfter, err := a.signCert(req.CSRPEM, req.ServerID, now)
 	if err != nil {
 		a.lg.Warn("httpapi: signing re-enrolment CSR failed", "server_id", req.ServerID, "err", err)
 		a.audit(r, "agent.reenrol_rejected", req.ServerID, map[string]string{"reason": "csr rejected: " + err.Error()})
 		writeError(w, http.StatusBadRequest)
+		return
+	}
+	err = a.st.RecordCertRotation(r.Context(), req.ServerID, fingerprint, notAfter)
+	if errors.Is(err, store.ErrServerInactive) || errors.Is(err, store.ErrNotFound) {
+		// Revoked or decommissioned between the key check and now.
+		a.lg.Warn("httpapi: cert rotation refused", "server_id", req.ServerID, "err", err)
+		a.audit(r, "agent.reenrol_rejected", req.ServerID, map[string]string{"reason": "agent revoked or server decommissioned"})
+		writeError(w, http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		a.lg.Error("httpapi: record cert rotation", "server_id", req.ServerID, "err", err)
+		writeError(w, http.StatusInternalServerError)
 		return
 	}
 	a.audit(r, "agent.re-enrolled", req.ServerID, map[string]string{"cert_fingerprint": fingerprint})
