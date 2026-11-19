@@ -1,0 +1,8 @@
+export default function Pending() {
+  return (
+    <main className="mx-auto mt-24 max-w-md p-4">
+      <h1 className="mb-2 text-xl font-semibold">Waiting for activation</h1>
+      <p>Your account is not active. An administrator must activate it before you can use FleetGuard.</p>
+    </main>
+  )
+}
