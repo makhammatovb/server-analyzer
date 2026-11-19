@@ -27,7 +27,8 @@ Every task's requirements implicitly include these. Values are copied from the s
 - **Enrolment tokens are single-use with a 1-hour TTL.**
 - **One Go module**, `github.com/makhammatovb/fleetguard`, with shared wire types in `pkg/api` used by both binaries.
 - **Secrets at rest are hashed, never stored in plaintext:** enrolment tokens, enrolment secrets, session tokens, passwords.
-- Toolchain present on the dev machine: Go 1.25.4, Node 26.4.0, Docker 29.1.3.
+- **Go toolchain floor is 1.26.0**, set in `go.mod`. This was 1.25.4 in the plan's first draft, which described the dev machine rather than a product requirement; two dependencies this plan mandates — `github.com/pressly/goose/v3` v3.30.1 and `github.com/testcontainers/testcontainers-go` v0.45.0 — both declare `go 1.26.0`, so 1.25.4 is only reachable by downgrading them. Contributors on 1.25.4 still build, because `GOTOOLCHAIN=auto` fetches the required toolchain; a CI image pinned to `GOTOOLCHAIN=local` with Go 1.25 will not, so Task 12's README must state the 1.26.0 floor and why.
+- Other toolchain present on the dev machine: Node 26.4.0, Docker 29.1.3.
 
 ## Review Focus
 
