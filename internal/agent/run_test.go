@@ -78,6 +78,12 @@ func (re *runEnv) sequence() []string {
 	return seq
 }
 
+func (re *runEnv) setPoll(n int) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.pollSec = &n
+}
+
 func (re *runEnv) force(path string, f func(n int) int) {
 	re.mu.Lock()
 	defer re.mu.Unlock()
@@ -251,22 +257,59 @@ func TestRunOnForbiddenReEnrolsOnceThenBacksOffToMaximumAndKeepsRunning(t *testi
 	}
 }
 
-func TestRunOnForbiddenKeepsRunningWhenReEnrolIsRefused(t *testing.T) {
+func TestRunOnForbiddenKeepsRetryingReEnrolWhenItIsRefused(t *testing.T) {
 	re := newRunEnv(t)
 	re.enrol(t)
 	re.force(hbPath, func(int) int { return http.StatusForbidden })
-	re.force(rePath, func(int) int { return http.StatusForbidden }) // revoked: cannot re-enrol
+	re.force(rePath, func(int) int { return http.StatusInternalServerError }) // transient failure
 
 	waits, err := re.drive(t, time.Now, 3, ceilingJitter)
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run returned %v: a revoked agent must keep retrying, not exit", err)
+		t.Fatalf("Run returned %v: the agent must keep retrying, not exit", err)
 	}
-	if got := re.count(rePath); got != 1 {
-		t.Errorf("re-enrol requests = %d, want 1", got)
+	// Re-enrol is the only recovery from a superseded certificate, so it must
+	// be retried on every attempt, not abandoned after the first failure.
+	if got := re.count(rePath); got != 3 {
+		t.Errorf("re-enrol requests = %d over 3 ticks, want 3 (one per tick)", got)
 	}
 	for i, d := range waits {
 		if d != 5*time.Minute {
 			t.Errorf("wait %d = %v, want the 5m maximum", i, d)
+		}
+	}
+}
+
+func TestRunHealsAfterForbiddenWhenReEnrolRecovers(t *testing.T) {
+	re := newRunEnv(t)
+	re.enrol(t)
+	// Superseded: the heartbeat 403s until a re-enrol has succeeded.
+	re.force(hbPath, func(int) int {
+		if re.count(rePath) < 2 { // the 2nd re-enrol request is the first to succeed
+			return http.StatusForbidden
+		}
+		return 0
+	})
+	re.force(rePath, func(n int) int {
+		if n == 1 {
+			return http.StatusServiceUnavailable
+		}
+		return 0
+	})
+	waits, _ := re.drive(t, time.Now, 3, ceilingJitter)
+	if waits[len(waits)-1] != 30*time.Second {
+		t.Errorf("last wait = %v, want the normal 30s poll once healed", waits[len(waits)-1])
+	}
+}
+
+func TestRunForbiddenWaitIsJittered(t *testing.T) {
+	re := newRunEnv(t)
+	re.enrol(t)
+	re.force(hbPath, func(int) int { return http.StatusForbidden })
+	half := func(c time.Duration) time.Duration { return c / 2 }
+	waits, _ := re.drive(t, time.Now, 2, half)
+	for i, d := range waits {
+		if d != 150*time.Second {
+			t.Errorf("wait %d = %v, want 150s: the 403 wait must pass through jitter, or a fleet stays in lockstep", i, d)
 		}
 	}
 }
@@ -428,7 +471,7 @@ func TestRunHonoursServerPollInterval(t *testing.T) {
 			re := newRunEnv(t)
 			re.enrol(t)
 			re.cfg.PollInterval = 45 * time.Second
-			re.pollSec = &c.server
+			re.setPoll(c.server)
 
 			waits, err := re.drive(t, time.Now, 2, ceilingJitter)
 			if !errors.Is(err, context.Canceled) {
@@ -440,5 +483,65 @@ func TestRunHonoursServerPollInterval(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunClampsConfiguredPollInterval(t *testing.T) {
+	for name, cfgInterval := range map[string]time.Duration{"1ms": time.Millisecond, "a week": 7 * 24 * time.Hour} {
+		t.Run(name, func(t *testing.T) {
+			re := newRunEnv(t)
+			re.enrol(t)
+			re.cfg.PollInterval = cfgInterval
+			re.setPoll(0) // the server states no preference, so the config applies
+			waits, _ := re.drive(t, time.Now, 2, ceilingJitter)
+			want := 10 * time.Second
+			if cfgInterval > time.Hour {
+				want = time.Hour
+			}
+			for i, d := range waits {
+				if d != want {
+					t.Errorf("wait %d = %v, want %v", i, d, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRunWaitsBetweenHeartbeats(t *testing.T) {
+	re := newRunEnv(t)
+	re.enrol(t)
+	re.cfg.PollInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx, re.cfg, time.Now) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for re.count(hbPath) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond) // a loop that does not wait would send hundreds here
+	if got := re.count(hbPath); got != 1 {
+		t.Errorf("heartbeats after 300ms = %d, want exactly 1: the loop is not waiting", got)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("Run err = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunRejectsInvalidVersionAtStartup(t *testing.T) {
+	re := newRunEnv(t)
+	re.enrol(t)
+	old := agent.Version
+	agent.Version = "has a space/slash"
+	t.Cleanup(func() { agent.Version = old })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := agent.Run(ctx, re.cfg, time.Now)
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("Run err = %v, want a startup validation error before the 2s limit", err)
+	}
+	if got := re.count(hbPath); got != 0 {
+		t.Errorf("%d heartbeats sent with an invalid version, want 0", got)
 	}
 }

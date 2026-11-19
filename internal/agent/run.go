@@ -60,6 +60,12 @@ func run(ctx context.Context, cfg Config, now func() time.Time, h runHooks) erro
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = DefaultPollInterval
 	}
+	// The same bounds apply to a bad config as to a bad server response: one
+	// mistyped value must not make every agent hammer the server.
+	if clamped := min(max(cfg.PollInterval, minPoll), maxPoll); clamped != cfg.PollInterval {
+		h.log.Warn("configured poll_interval out of range, clamped", "configured", cfg.PollInterval, "used", clamped)
+		cfg.PollInterval = clamped
+	}
 	l := &loop{cfg: cfg, now: now, h: h, bootID: readBootID(bootIDPath), started: now()}
 	id, err := l.startIdentity(ctx)
 	if err != nil {
@@ -67,6 +73,11 @@ func run(ctx context.Context, cfg Config, now func() time.Time, h runHooks) erro
 	}
 	l.setIdentity(id)
 	defer l.client.Close()
+	// A heartbeat the server would reject (for instance a Version set by
+	// -ldflags with a space in it) would otherwise be an endless silent 400 loop.
+	if err := l.heartbeat().Validate(); err != nil {
+		return fmt.Errorf("agent: heartbeat would be rejected by the server: %w", err)
+	}
 
 	for {
 		delay := l.tick(ctx)
@@ -189,15 +200,19 @@ func (l *loop) tick(ctx context.Context) time.Duration {
 
 	switch code {
 	case 401, 403:
-		// The identity was not accepted, or is superseded or revoked. Try to
-		// get a new one, once per episode.
+		// The identity was not accepted, or is superseded or revoked. Re-enrol
+		// is the only recovery from a superseded certificate (it authenticates
+		// with enrol.key, not the certificate), so it is retried on every failed
+		// attempt until one succeeds. After a success that did not help, stop
+		// re-enrolling until a heartbeat succeeds, so a persistent rejection
+		// cannot turn into a re-enrol storm.
 		if !l.reenrolled {
-			l.reenrolled = true
 			rerr := l.refresh(ctx)
 			if ctx.Err() != nil {
 				return 0
 			}
 			if rerr == nil {
+				l.reenrolled = true
 				l.fails = 0 // a fresh identity starts a fresh backoff
 				l.h.log.Info("re-enrolled after rejection", "status", code)
 				return 0
@@ -206,8 +221,9 @@ func (l *loop) tick(ctx context.Context) time.Duration {
 		}
 		if code == 403 {
 			// Revoked, decommissioned or still superseded: wait the longest
-			// interval and keep trying, so the agent heals on its own.
-			return maxBackoff
+			// interval, jittered so a fleet-wide event does not leave every
+			// agent in lockstep, and keep trying so the agent heals on its own.
+			return l.h.jitter(maxBackoff)
 		}
 	}
 	// Transport errors, 429, 5xx and a 401 that survived re-enrolment. A 429 is
@@ -265,7 +281,12 @@ func readBootID(path string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(b))
+	v := strings.TrimSpace(string(b))
+	// Anything the server would reject with a 400 is dropped; empty is valid.
+	if (api.Heartbeat{ServerID: "00000000-0000-0000-0000-000000000000", BootID: v}).Validate() != nil {
+		return ""
+	}
+	return v
 }
 
 // backoffCeiling is the largest wait after n consecutive failures: 5 s doubling

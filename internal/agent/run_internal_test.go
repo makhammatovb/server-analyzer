@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/makhammatovb/fleetguard/pkg/api"
 )
 
 func TestReadBootIDTrimsAndIsValid(t *testing.T) {
@@ -13,8 +16,29 @@ func TestReadBootIDTrimsAndIsValid(t *testing.T) {
 	if err := os.WriteFile(p, []byte("3f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := readBootID(p); got != "3f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f" {
+	got := readBootID(p)
+	if got != "3f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f" {
 		t.Errorf("readBootID = %q", got)
+	}
+	hb := api.Heartbeat{ServerID: "3f1c2a9e-1b2d-4c3e-8f40-0a1b2c3d4e5f", BootID: got}
+	if err := hb.Validate(); err != nil {
+		t.Errorf("a real boot id fails the server's validation: %v", err)
+	}
+}
+
+func TestReadBootIDDropsValuesTheServerWouldReject(t *testing.T) {
+	for name, content := range map[string]string{
+		"space":    "abc def",
+		"slash":    "abc/def",
+		"too long": strings.Repeat("a", 65),
+	} {
+		p := filepath.Join(t.TempDir(), "boot_id")
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := readBootID(p); got != "" {
+			t.Errorf("%s: readBootID = %q, want empty (valid) not a value that earns a 400", name, got)
+		}
 	}
 }
 
