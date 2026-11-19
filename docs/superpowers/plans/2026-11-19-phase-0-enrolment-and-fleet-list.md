@@ -314,6 +314,22 @@ git add -A && git commit -m "feat(api): single-use token enrolment and secret-ba
 - Consumes: `api.*` (Task 1); the enrolment endpoints (Task 5) are exercised through a test server built from `httpapi.NewAgentRouter`.
 - Produces: `agent.Config{ServerURL, StateDir string, PollInterval time.Duration}` with `agent.LoadConfig(path string) (Config, error)`; `agent.Identity{ServerID string, Cert tls.Certificate, CAPool *x509.CertPool, NotAfter time.Time}`; `agent.Enrol(ctx, cfg Config, token, hostname, version string) (Identity, error)`; `agent.LoadIdentity(cfg Config) (Identity, error)` returning `agent.ErrNoIdentity` when absent; `agent.ReEnrol(ctx, cfg Config) (Identity, error)`; `(Identity).NeedsRotation(now time.Time) bool`; `agent.NewClient(id Identity, cfg Config) *agent.Client` and `(*Client).SendHeartbeat(ctx, hb api.Heartbeat) (api.HeartbeatResponse, error)`.
 
+**Trust anchor: the agent pins the fleet CA and never uses system roots.** The agent
+verifies the server with `ca.crt` alone, on every call including the very first enrolment.
+This requires the **agent hostname's server certificate to be issued by the fleet CA**, not
+by ACME — see Task 12. The dashboard hostname keeps a public ACME certificate, because
+browsers need one; the agent does not. Pinning this way means no public certificate
+authority is in the agent's trust path at all, so no mis-issued or compromised public CA
+can intercept agent traffic, read a fleet's telemetry, or feed an agent forged responses.
+
+The bootstrap is the install command: `install.sh` fetches `ca.crt` from the dashboard
+hostname over publicly trusted TLS and writes it into the state directory *before* calling
+`enrol`, so the agent has its pin from the first request. The root of trust is therefore the
+same TLS connection that already delivers the installer and the one-time token — nothing
+weaker is introduced. There must be **no system-roots fallback**: a config field that
+silently falls back to system roots when `ca.crt` is missing would turn a missing-file bug
+into an undetectable downgrade, so a missing or unparseable `ca.crt` is a hard error.
+
 State directory layout, all files written `0600` and owned by root: `agent.crt`, `agent.key`, `ca.crt`, `enrol.key`, `server_id`. Config file `/etc/fleetguard/agent.yaml` holds only `server_url` and `poll_interval`. `NeedsRotation` is true when fewer than 30 days remain, giving the 90-day/60-day rule from the spec.
 
 - [ ] **Step 1: Write the failing tests**
@@ -634,7 +650,7 @@ git add -A && git commit -m "feat(web): login, registration, pending approval, f
 - Consumes: both binaries and `web/dist`.
 - Produces: `make up` brings the stack up; a documented install command enrols a real agent.
 
-**Caddy configuration.** Two site blocks on 443. The dashboard hostname serves `web/dist` and reverse-proxies `/api/*` to `127.0.0.1:8080`, with a public ACME certificate. The agent hostname uses `client_auth { mode verify_if_given; trust_pool file /var/lib/fleetguard/ca.crt }` — **not** `require_and_verify`, because an agent enrolling for the first time has no certificate and an agent whose certificate expired while offline must re-enrol without one; `verify_if_given` verifies the chain when a certificate is presented and admits the request when none is, and the backend then enforces per route — reverse-proxies `/v1/*` to the same backend, and sets both `header_up X-Agent-Cert {http.request.tls.client.certificate_der_base64}` and `header_up X-Proxy-Auth {env.FG_PROXY_SECRET}`. Because `header_up` replaces rather than appends, a client that supplies its own `X-Agent-Cert` or `X-Proxy-Auth` cannot have it reach the backend — the e2e test must assert that, since the whole agent-authentication model rests on it. `/install.sh` is served unauthenticated from the dashboard hostname, since it contains no secret; the token travels in the admin's command line.
+**Caddy configuration.** Two site blocks on 443, with **different certificate sources**, which is deliberate. The dashboard hostname serves `web/dist` and reverse-proxies `/api/*` to `127.0.0.1:8080` with a public ACME certificate, because browsers need one. The agent hostname serves a certificate **issued by the fleet CA** (`tls <cert> <key>`), because the agent pins that CA and must never fall back to system roots (Task 6). This needs one addition to the CA package: `(*CA).IssueServerCert(dnsName string, ttl time.Duration, now time.Time) (certPEM, keyPEM []byte, err error)`, setting `ExtKeyUsageServerAuth` and the DNS SAN — the existing `Sign` issues client certificates only. The server binary writes `agent-server.crt`/`.key` into the state directory at startup, reissuing when fewer than 60 days remain, with a 1-year TTL so Phase 0 needs no renewal daemon; Caddy loads them from there and picks up a reissue on restart. Record that restart requirement in the README. The agent hostname uses `client_auth { mode verify_if_given; trust_pool file /var/lib/fleetguard/ca.crt }` — **not** `require_and_verify`, because an agent enrolling for the first time has no certificate and an agent whose certificate expired while offline must re-enrol without one; `verify_if_given` verifies the chain when a certificate is presented and admits the request when none is, and the backend then enforces per route — reverse-proxies `/v1/*` to the same backend, and sets both `header_up X-Agent-Cert {http.request.tls.client.certificate_der_base64}` and `header_up X-Proxy-Auth {env.FG_PROXY_SECRET}`. Because `header_up` replaces rather than appends, a client that supplies its own `X-Agent-Cert` or `X-Proxy-Auth` cannot have it reach the backend — the e2e test must assert that, since the whole agent-authentication model rests on it. `/install.sh` is served unauthenticated from the dashboard hostname, since it contains no secret; the token travels in the admin's command line.
 
 **Deviation from spec §17.4, stated deliberately.** The spec requires the installer to
 verify a release signature against a pinned public key. Phase 0 has no release pipeline
@@ -645,7 +661,7 @@ to the central app, not a signature. Signature verification with a pinned key is
 **required** part of Phase 5's auto-update work and is recorded in the README as an
 outstanding item, not as done.
 
-`install.sh` must: refuse to run as non-root; detect `uname -m` and map to the right binary; download the agent over HTTPS; verify its SHA-256 against a published checksum file; install to `/usr/local/bin/fleetguard-agent`; create `/etc/fleetguard/agent.yaml` and `/var/lib/fleetguard` with mode `0700`; run `fleetguard-agent enrol --token=...`; install and enable the systemd unit; print the result. It must be idempotent — a second run re-enrols rather than failing — and must leave no copy of the token on disk.
+`install.sh` must: refuse to run as non-root; **fetch `ca.crt` from the dashboard hostname over publicly trusted TLS and install it into the state directory before enrolling**, since that connection is the agent's entire root of trust; detect `uname -m` and map to the right binary; download the agent over HTTPS; verify its SHA-256 against a published checksum file; install to `/usr/local/bin/fleetguard-agent`; create `/etc/fleetguard/agent.yaml` and `/var/lib/fleetguard` with mode `0700`; run `fleetguard-agent enrol --token=...`; install and enable the systemd unit; print the result. It must be idempotent — a second run re-enrols rather than failing — and must leave no copy of the token on disk.
 
 - [ ] **Step 1: Write the failing end-to-end test**
 
