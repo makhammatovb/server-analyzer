@@ -1,0 +1,15 @@
+# build output
+/fleetguard-agent
+/fleetguard-server
+/bin/
+web/node_modules/
+web/dist/
+
+# secrets and local state
+.env
+*.pem
+*.key
+*.crt
+
+# sdd scratch
+.superpowers/
