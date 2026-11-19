@@ -10,7 +10,8 @@
 //	FG_LISTEN               listen address, default 127.0.0.1:8080; must be loopback
 //	FG_ALLOW_PUBLIC_LISTEN  set to 1 to allow a non-loopback FG_LISTEN
 //	FG_STATE_DIR            CA and certificate directory, default /var/lib/fleetguard
-//	FG_AGENT_HOSTNAME       DNS name for the agent server certificate, default the FG_BASE_URL host
+//	FG_AGENT_URL            agent origin on a different host from FG_BASE_URL (required); its host
+//	                        gets the fleet-CA server certificate
 //	FG_BOOTSTRAP_USER, FG_BOOTSTRAP_PASSWORD
 //	                        create the first administrator if none exists
 package main
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,9 +44,10 @@ type config struct {
 	DSN               string
 	Listen            string
 	BaseURL           string
+	AgentURL          string
 	StateDir          string
 	ProxySecret       string
-	AgentHostname     string
+	AgentHostname     string // host of AgentURL; the agent server certificate is issued for it
 	BootstrapUser     string
 	BootstrapPassword string
 }
@@ -57,9 +60,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		DSN:               getenv("FG_DSN"),
 		Listen:            getenv("FG_LISTEN"),
 		BaseURL:           getenv("FG_BASE_URL"),
+		AgentURL:          getenv("FG_AGENT_URL"),
 		StateDir:          getenv("FG_STATE_DIR"),
 		ProxySecret:       getenv("FG_PROXY_SECRET"),
-		AgentHostname:     getenv("FG_AGENT_HOSTNAME"),
 		BootstrapUser:     getenv("FG_BOOTSTRAP_USER"),
 		BootstrapPassword: getenv("FG_BOOTSTRAP_PASSWORD"),
 	}
@@ -78,13 +81,25 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.BaseURL == "" {
 		return config{}, errors.New("FG_BASE_URL is required")
 	}
-	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || u.Scheme == "" || u.Hostname() == "" {
-		return config{}, fmt.Errorf("FG_BASE_URL %q must be an absolute URL such as https://fleet.example.com", cfg.BaseURL)
+	if cfg.AgentURL == "" {
+		return config{}, errors.New("FG_AGENT_URL is required: the agent origin, on a different host from FG_BASE_URL, e.g. https://agents.example.com")
 	}
-	if cfg.AgentHostname == "" {
-		cfg.AgentHostname = u.Hostname()
+	base, err := originHost("FG_BASE_URL", cfg.BaseURL)
+	if err != nil {
+		return config{}, err
 	}
+	agent, err := originHost("FG_AGENT_URL", cfg.AgentURL)
+	if err != nil {
+		return config{}, err
+	}
+	// The dashboard presents a browser-trusted ACME certificate; the agent
+	// origin must present one from the fleet CA, which agents pin with no
+	// fallback. One host cannot present both, so a shared host would enrol
+	// agents that then never connect.
+	if strings.EqualFold(base, agent) {
+		return config{}, fmt.Errorf("FG_AGENT_URL and FG_BASE_URL must have a different host (both are %q): the dashboard needs a browser-trusted certificate and the agent origin needs one issued by the fleet CA, which a single hostname cannot present", base)
+	}
+	cfg.AgentHostname = agent
 	if (cfg.BootstrapUser == "") != (cfg.BootstrapPassword == "") {
 		return config{}, errors.New("FG_BOOTSTRAP_USER and FG_BOOTSTRAP_PASSWORD must be set together")
 	}
@@ -92,6 +107,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("FG_LISTEN: %w", err)
 	}
 	return cfg, nil
+}
+
+// originHost returns the host of an absolute URL, or an error naming the variable.
+func originHost(name, raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("%s %q must be an absolute URL such as https://fleet.example.com", name, raw)
+	}
+	return u.Hostname(), nil
 }
 
 func main() {
@@ -142,7 +166,7 @@ func run(lg *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", httpapi.NewAgentRouter(st, authority, cfg.ProxySecret, lg))
-	mux.Handle("/api/", httpapi.NewAdminRouterAt(st, svc, cfg.BaseURL, cfg.ProxySecret, lg, time.Now))
+	mux.Handle("/api/", httpapi.NewAdminRouterAt(st, svc, cfg.BaseURL, cfg.AgentURL, cfg.ProxySecret, lg, time.Now))
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

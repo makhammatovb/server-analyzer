@@ -53,9 +53,10 @@ func (a *authAPI) registerServerRoutes(mux *http.ServeMux, requireUser func(http
 }
 
 // installCommand renders the one-liner an admin runs on the new server. The
-// token is base64url, so it needs no shell quoting.
+// installer is fetched from the dashboard origin, but the agent is pointed at
+// the agent origin, whose certificate it can verify. The token is base64url, so it needs no shell quoting.
 func (a *authAPI) installCommand(token string) string {
-	return fmt.Sprintf("curl -sSL %s/install.sh | sudo bash -s -- --token=%s --server-url=%s", a.origin, token, a.origin)
+	return fmt.Sprintf("curl -sSL %s/install.sh | sudo bash -s -- --token=%s --server-url=%s", a.origin, token, a.agentOrigin)
 }
 
 // issueToken mints a single-use token for serverID and audits that it was

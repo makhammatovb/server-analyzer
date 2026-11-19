@@ -13,6 +13,7 @@ func validEnv() map[string]string {
 	return map[string]string{ //nolint:gosec // test fixture, not a credential
 		"FG_DSN":          "postgres://u:p@127.0.0.1:5432/fleetguard",
 		"FG_BASE_URL":     "https://fleet.example.test",
+		"FG_AGENT_URL":    "https://agents.example.test",
 		"FG_PROXY_SECRET": "s3cret",
 	}
 }
@@ -25,13 +26,13 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Listen != "127.0.0.1:8080" || cfg.StateDir != "/var/lib/fleetguard" {
 		t.Fatalf("defaults = %q, %q", cfg.Listen, cfg.StateDir)
 	}
-	if cfg.AgentHostname != "fleet.example.test" {
-		t.Fatalf("AgentHostname = %q, want the base URL host", cfg.AgentHostname)
+	if cfg.AgentHostname != "agents.example.test" {
+		t.Fatalf("AgentHostname = %q, want the host of FG_AGENT_URL, not the dashboard host", cfg.AgentHostname)
 	}
 }
 
 func TestLoadConfigRefusesMissingRequiredValues(t *testing.T) {
-	for _, key := range []string{"FG_DSN", "FG_BASE_URL", "FG_PROXY_SECRET"} {
+	for _, key := range []string{"FG_DSN", "FG_BASE_URL", "FG_AGENT_URL", "FG_PROXY_SECRET"} {
 		e := validEnv()
 		delete(e, key)
 		_, err := loadConfig(env(e))
@@ -74,5 +75,24 @@ func TestLoadConfigRejectsABaseURLWithoutAHost(t *testing.T) {
 	e["FG_BASE_URL"] = "fleet.example.test"
 	if _, err := loadConfig(env(e)); err == nil {
 		t.Fatal("scheme-less base URL accepted")
+	}
+}
+
+func TestLoadConfigRefusesAgentURLSharingTheDashboardHost(t *testing.T) {
+	for _, agentURL := range []string{"https://fleet.example.test", "https://FLEET.example.test:8443/x"} {
+		e := validEnv()
+		e["FG_AGENT_URL"] = agentURL
+		_, err := loadConfig(env(e))
+		if err == nil || !strings.Contains(err.Error(), "different host") {
+			t.Errorf("FG_AGENT_URL=%q: err = %v, want a different-host refusal", agentURL, err)
+		}
+	}
+}
+
+func TestLoadConfigRejectsAnAgentURLWithoutAHost(t *testing.T) {
+	e := validEnv()
+	e["FG_AGENT_URL"] = "agents.example.test"
+	if _, err := loadConfig(env(e)); err == nil {
+		t.Fatal("scheme-less agent URL accepted")
 	}
 }

@@ -142,7 +142,7 @@ func TestCreateServerReturnsInstallCommandWithToken(t *testing.T) {
 	out := e.createServer(t, e.adminCookie(t))
 
 	token := tokenFromCommand(t, out.InstallCommand)
-	want := "curl -sSL " + baseURL + "/install.sh | sudo bash -s -- --token=" + token + " --server-url=" + baseURL
+	want := "curl -sSL " + baseURL + "/install.sh | sudo bash -s -- --token=" + token + " --server-url=" + agentURL
 	if out.InstallCommand != want {
 		t.Fatalf("install_command = %q\nwant %q", out.InstallCommand, want)
 	}

@@ -42,7 +42,8 @@ type authAPI struct {
 	svc          *auth.Service
 	lg           *slog.Logger
 	now          func() time.Time
-	origin       string
+	origin       string // dashboard origin: install.sh, Origin checks
+	agentOrigin  string // agent origin, presented to new agents as --server-url
 	proxySecret  string
 	loginByUser  *RateLimiter
 	loginByIP    *RateLimiter
@@ -50,17 +51,20 @@ type authAPI struct {
 }
 
 // NewAdminRouter serves the human-facing API: registration, sign-in, user and server
-// administration. baseURL is the public origin of the dashboard; browsers
+// administration. baseURL is the public origin of the dashboard and agentURL the
+// separate origin agents connect to (it presents the fleet-CA certificate, so it
+// must not share a host with the dashboard); browsers
 // sending a different Origin on a state-changing request are refused.
-func NewAdminRouter(st *store.Store, svc *auth.Service, baseURL, proxySecret string) http.Handler {
-	return NewAdminRouterAt(st, svc, baseURL, proxySecret, slog.Default(), time.Now)
+func NewAdminRouter(st *store.Store, svc *auth.Service, baseURL, agentURL, proxySecret string) http.Handler {
+	return NewAdminRouterAt(st, svc, baseURL, agentURL, proxySecret, slog.Default(), time.Now)
 }
 
 // NewAdminRouterAt is NewAdminRouter with an injectable logger and clock.
-func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL, proxySecret string, lg *slog.Logger, now func() time.Time) http.Handler {
+func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL, agentURL, proxySecret string, lg *slog.Logger, now func() time.Time) http.Handler {
 	a := &authAPI{
 		st: st, svc: svc, lg: lg, now: now,
 		origin:       strings.TrimRight(baseURL, "/"),
+		agentOrigin:  strings.TrimRight(agentURL, "/"),
 		proxySecret:  proxySecret,
 		loginByUser:  NewRateLimiter(attemptsPerMinute),
 		loginByIP:    NewRateLimiter(attemptsPerMinute),
