@@ -49,7 +49,7 @@ type authAPI struct {
 	registerByIP *RateLimiter
 }
 
-// NewAdminRouter serves the human-facing API: registration, sign-in and user
+// NewAdminRouter serves the human-facing API: registration, sign-in, user and server
 // administration. baseURL is the public origin of the dashboard; browsers
 // sending a different Origin on a state-changing request are refused.
 func NewAdminRouter(st *store.Store, svc *auth.Service, baseURL, proxySecret string) http.Handler {
@@ -76,6 +76,7 @@ func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL, proxySecret s
 	mux.Handle("GET /api/me", requireUser(http.HandlerFunc(a.me)))
 	mux.Handle("GET /api/users", requireUser(RequireAdmin(http.HandlerFunc(a.listUsers))))
 	mux.Handle("POST /api/users/{id}/activate", requireUser(RequireAdmin(http.HandlerFunc(a.activate))))
+	a.registerServerRoutes(mux, requireUser)
 	return RequireProxySecret(proxySecret)(a.sameOrigin(mux))
 }
 

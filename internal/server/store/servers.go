@@ -33,6 +33,9 @@ type Server struct {
 	Name      string
 	Note      string
 	CreatedAt time.Time
+	// DecommissionedAt is set once the server has been retired; GetServer
+	// still returns such a server, the fleet list does not.
+	DecommissionedAt *time.Time
 }
 
 // ServerStatus is a server together with the state of its agent.
@@ -75,8 +78,8 @@ func (s *Store) GetServer(ctx context.Context, id string) (Server, error) {
 	}
 	var srv Server
 	err := s.pool.QueryRow(ctx,
-		`SELECT id::text, name, note, created_at FROM servers WHERE id = $1`, id).
-		Scan(&srv.ID, &srv.Name, &srv.Note, &srv.CreatedAt)
+		`SELECT id::text, name, note, created_at, decommissioned_at FROM servers WHERE id = $1`, id).
+		Scan(&srv.ID, &srv.Name, &srv.Note, &srv.CreatedAt, &srv.DecommissionedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Server{}, ErrNotFound
 	}
@@ -154,4 +157,40 @@ func (s *Store) ConsumeEnrolToken(ctx context.Context, plaintext string, now tim
 		return "", fmt.Errorf("store: consume enrolment token: %w", err)
 	}
 	return serverID, nil
+}
+
+// DecommissionServer retires a server and revokes its agent in one transaction,
+// writing the "server.decommissioned" audit row in the same transaction. There
+// is no CRL, so these two columns are the whole of revocation: afterwards the
+// store refuses token consumption, enrolment-key verification, certificate
+// rotation and heartbeats for the server. It returns ErrNotFound if the server
+// does not exist or is already decommissioned, so a repeat call changes nothing.
+func (s *Store) DecommissionServer(ctx context.Context, serverID, actor string, now time.Time) error {
+	if _, err := uuid.Parse(serverID); err != nil {
+		return ErrNotFound
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx,
+		`UPDATE servers SET decommissioned_at = $2 WHERE id = $1 AND decommissioned_at IS NULL`, serverID, now)
+	if err != nil {
+		return fmt.Errorf("store: decommission server: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE agents SET revoked_at = COALESCE(revoked_at, $2) WHERE server_id = $1`, serverID, now); err != nil {
+		return fmt.Errorf("store: revoke agent: %w", err)
+	}
+	if err := appendAudit(ctx, tx, actor, "server.decommissioned", serverID, nil); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit decommission: %w", err)
+	}
+	return nil
 }

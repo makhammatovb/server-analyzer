@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -247,4 +248,125 @@ func (c *CA) Verify(certDER []byte, now time.Time) (string, error) {
 		return "", ErrBadSubject
 	}
 	return id, nil
+}
+
+const (
+	// ServerCertTTL is the lifetime of the agent hostname's server certificate.
+	// A year means Phase 0 needs no renewal daemon; the binary reissues at start.
+	ServerCertTTL = 365 * 24 * time.Hour
+	// ServerCertRenewBefore is how close to expiry a certificate is replaced.
+	ServerCertRenewBefore = 60 * 24 * time.Hour
+
+	serverCertFile = "agent-server.crt"
+	serverKeyFile  = "agent-server.key"
+)
+
+// IssueServerCert issues a TLS server certificate for dnsName with its own
+// fresh key. The agent pins this CA as its only trust root, so the agent
+// hostname must present a certificate from here rather than from ACME. The
+// certificate carries ExtKeyUsageServerAuth only and therefore never passes
+// Verify, which demands client authentication.
+func (c *CA) IssueServerCert(dnsName string, ttl time.Duration, now time.Time) (certPEM, keyPEM []byte, err error) {
+	if dnsName == "" {
+		return nil, nil, errors.New("ca: empty DNS name")
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: generate server key: %w", err)
+	}
+	serial, err := newSerial()
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: serial: %w", err)
+	}
+	notBefore := now.Add(-time.Minute)
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: dnsName},
+		DNSNames:     []string{dnsName},
+		NotBefore:    notBefore,
+		NotAfter:     notBefore.Add(ttl),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, c.cert, &key.PublicKey, c.key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: sign server certificate: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: marshal server key: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+// EnsureServerCert makes sure dir holds a usable agent-server.crt and
+// agent-server.key for dnsName, and reports whether it (re)issued them. Existing
+// files are kept only if the pair loads, the certificate chains to this CA for
+// server authentication, names dnsName, and has more than ServerCertRenewBefore
+// left; anything else, including unreadable or damaged files, is replaced.
+func (c *CA) EnsureServerCert(dir, dnsName string, now time.Time) (bool, error) {
+	if c.serverCertUsable(dir, dnsName, now) {
+		return false, nil
+	}
+	certPEM, keyPEM, err := c.IssueServerCert(dnsName, ServerCertTTL, now)
+	if err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, fmt.Errorf("ca: create dir: %w", err)
+	}
+	// Key first: a crash between the two writes leaves a mismatched pair, which
+	// serverCertUsable rejects, so the next start repairs it.
+	if err := writeReplace(filepath.Join(dir, serverKeyFile), keyPEM); err != nil {
+		return false, err
+	}
+	if err := writeReplace(filepath.Join(dir, serverCertFile), certPEM); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (c *CA) serverCertUsable(dir, dnsName string, now time.Time) bool {
+	certPEM, err := os.ReadFile(filepath.Join(dir, serverCertFile)) //nolint:gosec // path is operator-configured
+	if err != nil {
+		return false
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dir, serverKeyFile)) //nolint:gosec // path is operator-configured
+	if err != nil {
+		return false
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil || len(pair.Certificate) == 0 {
+		return false
+	}
+	cert, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return false
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(c.cert)
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots: roots, DNSName: dnsName, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return false
+	}
+	return cert.NotAfter.Sub(now) > ServerCertRenewBefore
+}
+
+// writeReplace writes data to path with mode 0600 via a temporary file and a
+// rename, so a reader never sees a half-written file.
+func writeReplace(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("ca: clear %s: %w", filepath.Base(tmp), err)
+	}
+	if err := writeExclusive(tmp, data); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("ca: replace %s: %w", filepath.Base(path), err)
+	}
+	return nil
 }

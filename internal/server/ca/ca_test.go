@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -239,5 +240,140 @@ func TestSignRejectsWrongPEMType(t *testing.T) {
 	block.Type = "CERTIFICATE"
 	if _, err := c.Sign(pem.EncodeToMemory(block), testServerID, time.Hour, time.Now()); err == nil {
 		t.Fatal("Sign accepted a PEM block that is not a CERTIFICATE REQUEST")
+	}
+}
+
+func TestIssueServerCertIsServerAuthForTheNameAndChainsToCA(t *testing.T) {
+	c := newCA(t)
+	now := time.Now()
+	certPEM, keyPEM, err := c.IssueServerCert("agents.example.test", ServerCertTTL, now)
+	if err != nil {
+		t.Fatalf("IssueServerCert: %v", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("no certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(c.cert)
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots: roots, DNSName: "agents.example.test", CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Fatalf("server verification: %v", err)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots: roots, DNSName: "other.example.test", CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err == nil {
+		t.Fatal("certificate verified for a name it was not issued for")
+	}
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		t.Fatalf("key does not match certificate: %v", err)
+	}
+	// A server certificate must never authenticate an agent.
+	if _, err := c.Verify(block.Bytes, now); err == nil {
+		t.Fatal("server certificate accepted as a client certificate")
+	}
+}
+
+func TestIssueServerCertUsesAFreshKeyEachTime(t *testing.T) {
+	c := newCA(t)
+	_, k1, err1 := c.IssueServerCert("a.example.test", time.Hour, time.Now())
+	_, k2, err2 := c.IssueServerCert("a.example.test", time.Hour, time.Now())
+	if err1 != nil || err2 != nil {
+		t.Fatalf("errors: %v, %v", err1, err2)
+	}
+	if len(k1) == 0 || string(k1) == string(k2) {
+		t.Fatal("keys empty or reused")
+	}
+}
+
+func TestEnsureServerCertWritesReusesAndRenews(t *testing.T) {
+	c := newCA(t)
+	dir := t.TempDir()
+	now := time.Now()
+	read := func() (string, string) {
+		crt, err := os.ReadFile(filepath.Join(dir, "agent-server.crt")) //nolint:gosec // test path
+		if err != nil {
+			t.Fatalf("read crt: %v", err)
+		}
+		key, err := os.ReadFile(filepath.Join(dir, "agent-server.key")) //nolint:gosec // test path
+		if err != nil {
+			t.Fatalf("read key: %v", err)
+		}
+		return string(crt), string(key)
+	}
+
+	if reissued, err := c.EnsureServerCert(dir, "agents.example.test", now); err != nil || !reissued {
+		t.Fatalf("first call = %v, %v; want true, nil", reissued, err)
+	}
+	for _, name := range []string{"agent-server.crt", "agent-server.key"} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s: %v, mode %v; want 0600", name, err, fi)
+		}
+	}
+	crt1, key1 := read()
+
+	if reissued, err := c.EnsureServerCert(dir, "agents.example.test", now.Add(24*time.Hour)); err != nil || reissued {
+		t.Fatalf("second call = %v, %v; want false, nil", reissued, err)
+	}
+	if crt, key := read(); crt != crt1 || key != key1 {
+		t.Fatal("files changed although the certificate had plenty of life left")
+	}
+
+	// 61 days before expiry: still left alone. 59 days: renewed.
+	expiry := now.Add(ServerCertTTL)
+	if reissued, _ := c.EnsureServerCert(dir, "agents.example.test", expiry.Add(-61*24*time.Hour)); reissued {
+		t.Fatal("reissued with 61 days remaining")
+	}
+	if reissued, err := c.EnsureServerCert(dir, "agents.example.test", expiry.Add(-59*24*time.Hour)); err != nil || !reissued {
+		t.Fatalf("with 59 days remaining = %v, %v; want true, nil", reissued, err)
+	}
+	if crt, _ := read(); crt == crt1 {
+		t.Fatal("certificate not replaced")
+	}
+}
+
+func TestEnsureServerCertReissuesForANewHostname(t *testing.T) {
+	c := newCA(t)
+	dir := t.TempDir()
+	now := time.Now()
+	if _, err := c.EnsureServerCert(dir, "old.example.test", now); err != nil {
+		t.Fatal(err)
+	}
+	if reissued, err := c.EnsureServerCert(dir, "new.example.test", now); err != nil || !reissued {
+		t.Fatalf("hostname change = %v, %v; want true, nil", reissued, err)
+	}
+}
+
+func TestEnsureServerCertReissuesWhenIssuedByAnotherCA(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	if _, err := newCA(t).EnsureServerCert(dir, "agents.example.test", now); err != nil {
+		t.Fatal(err)
+	}
+	if reissued, err := newCA(t).EnsureServerCert(dir, "agents.example.test", now); err != nil || !reissued {
+		t.Fatalf("foreign CA = %v, %v; want true, nil", reissued, err)
+	}
+}
+
+func TestEnsureServerCertReissuesWhenTheFilesAreDamaged(t *testing.T) {
+	c := newCA(t)
+	dir := t.TempDir()
+	now := time.Now()
+	if _, err := c.EnsureServerCert(dir, "agents.example.test", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent-server.key"), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if reissued, err := c.EnsureServerCert(dir, "agents.example.test", now); err != nil || !reissued {
+		t.Fatalf("damaged key = %v, %v; want true, nil", reissued, err)
 	}
 }
