@@ -38,6 +38,24 @@ const rotateWithin = 30 * 24 * time.Hour
 // identity.
 var ErrNoIdentity = errors.New("agent: no identity")
 
+// ErrNoCA is returned when ca.crt is missing or unusable. ca.crt is the
+// agent's only trust anchor, placed by the installer before enrolment; there is
+// deliberately no fallback to system roots, so a missing pin fails closed.
+var ErrNoCA = errors.New("agent: ca.crt missing or unusable in state directory; the agent trusts only that CA")
+
+// loadPinnedCA reads ca.crt and returns its PEM and pool.
+func loadPinnedCA(dir string) ([]byte, *x509.CertPool, error) {
+	caPEM, err := readState(dir, fileCA)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrNoCA, err)
+	}
+	pool, err := poolFromPEM(caPEM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrNoCA, err)
+	}
+	return caPEM, pool, nil
+}
+
 // Identity is the agent's enrolled credentials.
 type Identity struct {
 	ServerID string
@@ -52,14 +70,20 @@ func (i Identity) NeedsRotation(now time.Time) bool {
 }
 
 // Enrol generates a key and CSR on this host, redeems the one-time token and
-// persists the issued identity. The private key is never transmitted.
+// persists the issued identity. The private key is never transmitted. The
+// server is verified against the pinned ca.crt, which must already be in the
+// state directory; Enrol never overwrites it with anything the server sends.
 func Enrol(ctx context.Context, cfg Config, token, hostname, version string) (Identity, error) {
+	caPEM, pool, err := loadPinnedCA(cfg.StateDir)
+	if err != nil {
+		return Identity{}, err
+	}
 	keyPEM, csrPEM, err := newKeyAndCSR()
 	if err != nil {
 		return Identity{}, err
 	}
 	var resp api.EnrolResponse
-	err = postJSON(ctx, bootstrapClient(cfg.RootCAs), cfg.ServerURL+"/v1/enrol", api.EnrolRequest{
+	err = postJSON(ctx, bootstrapClient(pool), cfg.ServerURL+"/v1/enrol", api.EnrolRequest{
 		Token: token, CSRPEM: csrPEM, Hostname: hostname, AgentVersion: version,
 	}, &resp)
 	if err != nil {
@@ -71,7 +95,7 @@ func Enrol(ctx context.Context, cfg Config, token, hostname, version string) (Id
 	if _, err := uuid.Parse(resp.ServerID); err != nil {
 		return Identity{}, errors.New("agent: enrol: server returned an invalid server id")
 	}
-	id, err := buildIdentity(resp.ServerID, resp.CertPEM, keyPEM, resp.CAPEM)
+	id, err := buildIdentity(resp.ServerID, resp.CertPEM, keyPEM, caPEM)
 	if err != nil {
 		return Identity{}, fmt.Errorf("agent: enrol: %w", err)
 	}
@@ -81,7 +105,6 @@ func Enrol(ctx context.Context, cfg Config, token, hostname, version string) (Id
 	// The certificate is written last: LoadIdentity treats its absence as
 	// "not enrolled", so a crash part way through leaves no half identity.
 	files := []stateFile{
-		{fileCA, resp.CAPEM},
 		{fileEnrolKey, []byte(resp.EnrolKey)},
 		{fileServerID, []byte(resp.ServerID)},
 		{fileKey, keyPEM},
@@ -107,11 +130,7 @@ func ReEnrol(ctx context.Context, cfg Config) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	caPEM, err := readState(cfg.StateDir, fileCA)
-	if err != nil {
-		return Identity{}, err
-	}
-	pool, err := poolFromPEM(caPEM)
+	caPEM, pool, err := loadPinnedCA(cfg.StateDir)
 	if err != nil {
 		return Identity{}, err
 	}

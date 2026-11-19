@@ -4,7 +4,6 @@
 package agent
 
 import (
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/url"
@@ -28,12 +27,6 @@ type Config struct {
 	ServerURL    string
 	StateDir     string
 	PollInterval time.Duration
-
-	// RootCAs is the trust anchor for the server's TLS certificate when the
-	// agent has no ca.crt yet, i.e. during Enrol. Nil means the system roots.
-	// Once enrolled, the CA from ca.crt is trusted instead. It is never read
-	// from the config file.
-	RootCAs *x509.CertPool
 }
 
 // fileConfig is the on-disk format: exactly these two keys.

@@ -50,12 +50,24 @@ func newEnv(t *testing.T) *env {
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router := httpapi.NewAgentRouter(st, pki.CA, proxySecret, lg)
 	url := NewTestProxy(t, pki, proxySecret, HeartbeatBackend(pki.CA, router))
-	return &env{st: st, pki: pki, cfg: agent.Config{
+	cfg := agent.Config{
 		ServerURL:    url,
 		StateDir:     filepath.Join(t.TempDir(), "state"),
 		PollInterval: 30 * time.Second,
-		RootCAs:      pki.Pool,
-	}}
+	}
+	// The installer places ca.crt before enrolling; it is the agent's pin.
+	placeCA(t, cfg.StateDir, pki.CAPEM)
+	return &env{st: st, pki: pki, cfg: cfg}
+}
+
+func placeCA(t *testing.T, stateDir string, caPEM []byte) {
+	t.Helper()
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "ca.crt"), caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (e *env) token(t *testing.T) string {
@@ -249,6 +261,7 @@ func TestEnrolRefusesPlainHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(srv.Close)
 	cfg := agent.Config{ServerURL: srv.URL, StateDir: t.TempDir()}
+	placeCA(t, cfg.StateDir, NewPKI(t).CAPEM)
 	if _, err := agent.Enrol(context.Background(), cfg, "tok", "host-1", "0.0.1"); err == nil {
 		t.Fatal("Enrol over http succeeded")
 	}
@@ -263,4 +276,41 @@ func csrFor(t *testing.T, keyPath string) []byte {
 		t.Fatalf("csr: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+}
+
+func TestEnrolWithoutCACrtIsHardError(t *testing.T) {
+	e := newEnv(t)
+	if err := os.Remove(filepath.Join(e.cfg.StateDir, "ca.crt")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := agent.Enrol(context.Background(), e.cfg, e.token(t), "host-1", "0.0.1")
+	if !errors.Is(err, agent.ErrNoCA) {
+		t.Fatalf("err = %v, want ErrNoCA", err)
+	}
+}
+
+func TestEnrolWithUnparseableCACrtIsHardError(t *testing.T) {
+	e := newEnv(t)
+	placeCA(t, e.cfg.StateDir, []byte("not a certificate"))
+	_, err := agent.Enrol(context.Background(), e.cfg, e.token(t), "host-1", "0.0.1")
+	if !errors.Is(err, agent.ErrNoCA) {
+		t.Fatalf("err = %v, want ErrNoCA", err)
+	}
+}
+
+// The pin: ca.crt names a CA other than the one the server certificate chains
+// to, so the agent must refuse to talk to it and spend no token.
+func TestEnrolRejectsServerNotIssuedByPinnedCA(t *testing.T) {
+	e := newEnv(t)
+	placeCA(t, e.cfg.StateDir, NewPKI(t).CAPEM)
+	tok := e.token(t)
+	_, err := agent.Enrol(context.Background(), e.cfg, tok, "host-1", "0.0.1")
+	if err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("err = %v, want a certificate verification error", err)
+	}
+	// Token unspent: enrolling with the right pin still works.
+	placeCA(t, e.cfg.StateDir, e.pki.CAPEM)
+	if _, err := agent.Enrol(context.Background(), e.cfg, tok, "host-1", "0.0.1"); err != nil {
+		t.Fatalf("enrol with correct pin: %v", err)
+	}
 }
