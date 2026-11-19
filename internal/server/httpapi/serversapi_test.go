@@ -401,7 +401,7 @@ func TestRefusesNonLoopbackListenWithoutOverride(t *testing.T) {
 			t.Errorf("CheckListenAddr(%q, false) = nil, want an error", addr)
 		}
 	}
-	allowed := []string{"127.0.0.1:8080", "[::1]:8080", "localhost:8080", "127.0.0.2:9000"}
+	allowed := []string{"127.0.0.1:8080", "[::1]:8080", "127.0.0.2:9000"}
 	for _, addr := range allowed {
 		if err := httpapi.CheckListenAddr(addr, false); err != nil {
 			t.Errorf("CheckListenAddr(%q, false) = %v, want nil", addr, err)

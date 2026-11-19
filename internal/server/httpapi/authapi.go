@@ -50,21 +50,31 @@ type authAPI struct {
 	registerByIP *RateLimiter
 }
 
+// Origins are the two public origins of the deployment. They are named fields
+// rather than adjacent string parameters so that swapping them does not compile.
+type Origins struct {
+	// Dashboard serves the UI, /api/*, /install.sh and /ca.crt. Browsers sending
+	// a different Origin on a state-changing request are refused.
+	Dashboard string
+	// Agent is the origin agents connect to. It presents the fleet-CA
+	// certificate, so it must not share a host with Dashboard. New agents are
+	// given it as --server-url.
+	Agent string
+}
+
 // NewAdminRouter serves the human-facing API: registration, sign-in, user and server
-// administration. baseURL is the public origin of the dashboard and agentURL the
-// separate origin agents connect to (it presents the fleet-CA certificate, so it
-// must not share a host with the dashboard); browsers
+// administration. See Origins for the two public origins; browsers
 // sending a different Origin on a state-changing request are refused.
-func NewAdminRouter(st *store.Store, svc *auth.Service, baseURL, agentURL, proxySecret string) http.Handler {
-	return NewAdminRouterAt(st, svc, baseURL, agentURL, proxySecret, slog.Default(), time.Now)
+func NewAdminRouter(st *store.Store, svc *auth.Service, origins Origins, proxySecret string) http.Handler {
+	return NewAdminRouterAt(st, svc, origins, proxySecret, slog.Default(), time.Now)
 }
 
 // NewAdminRouterAt is NewAdminRouter with an injectable logger and clock.
-func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL, agentURL, proxySecret string, lg *slog.Logger, now func() time.Time) http.Handler {
+func NewAdminRouterAt(st *store.Store, svc *auth.Service, origins Origins, proxySecret string, lg *slog.Logger, now func() time.Time) http.Handler {
 	a := &authAPI{
 		st: st, svc: svc, lg: lg, now: now,
-		origin:       strings.TrimRight(baseURL, "/"),
-		agentOrigin:  strings.TrimRight(agentURL, "/"),
+		origin:       strings.TrimRight(origins.Dashboard, "/"),
+		agentOrigin:  strings.TrimRight(origins.Agent, "/"),
 		proxySecret:  proxySecret,
 		loginByUser:  NewRateLimiter(attemptsPerMinute),
 		loginByIP:    NewRateLimiter(attemptsPerMinute),

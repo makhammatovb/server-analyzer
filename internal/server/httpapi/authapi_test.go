@@ -39,7 +39,7 @@ func newAdminEnv(t *testing.T) *adminEnv {
 	svc := auth.New(st)
 	e := &adminEnv{st: st, svc: svc, now: time.Now()}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	e.h = httpapi.NewAdminRouterAt(st, svc, baseURL, agentURL, proxySecret, lg, func() time.Time { return e.now })
+	e.h = httpapi.NewAdminRouterAt(st, svc, httpapi.Origins{Dashboard: baseURL, Agent: agentURL}, proxySecret, lg, func() time.Time { return e.now })
 	return e
 }
 
@@ -393,7 +393,7 @@ func TestBusyHashingReturns503(t *testing.T) {
 		})
 	}))
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := httpapi.NewAdminRouterAt(st, svc, baseURL, agentURL, proxySecret, lg, time.Now)
+	h := httpapi.NewAdminRouterAt(st, svc, httpapi.Origins{Dashboard: baseURL, Agent: agentURL}, proxySecret, lg, time.Now)
 	post := func(i int) int {
 		r := httptest.NewRequest("POST", "/api/login", strings.NewReader(creds("u-"+uuid.NewString(), "wrong password!!")))
 		r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1", i)

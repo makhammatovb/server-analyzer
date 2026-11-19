@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -109,11 +110,30 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return cfg, nil
 }
 
-// originHost returns the host of an absolute URL, or an error naming the variable.
+// originHost returns the host of an https origin, or an error naming the
+// variable. The value is interpolated into an install command an admin pastes
+// into a root shell, and the install script is the agent's only root of trust,
+// so anything but a bare https origin (optional port, optional trailing slash)
+// is refused: no plaintext, path, userinfo, query, fragment or shell-significant
+// characters.
 func originHost(name, raw string) (string, error) {
+	bad := func(why string) (string, error) {
+		return "", fmt.Errorf("%s %q must be a bare https origin such as https://fleet.example.com (%s)", name, raw, why)
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" || u.Hostname() == "" {
-		return "", fmt.Errorf("%s %q must be an absolute URL such as https://fleet.example.com", name, raw)
+	switch {
+	case err != nil:
+		return bad("not a URL")
+	case u.Scheme != "https":
+		return bad("scheme must be https")
+	case u.Hostname() == "":
+		return bad("no host")
+	case u.Path != "" && u.Path != "/", u.RawQuery != "", u.Fragment != "", u.User != nil, u.Opaque != "":
+		return bad("no path, userinfo, query or fragment allowed")
+	case strings.Trim(u.Hostname(), "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != "":
+		return bad("host may contain only letters, digits, dots and hyphens")
+	case strings.TrimRight(u.Port(), "0123456789") != "":
+		return bad("invalid port")
 	}
 	return u.Hostname(), nil
 }
@@ -166,10 +186,9 @@ func run(lg *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", httpapi.NewAgentRouter(st, authority, cfg.ProxySecret, lg))
-	mux.Handle("/api/", httpapi.NewAdminRouterAt(st, svc, cfg.BaseURL, cfg.AgentURL, cfg.ProxySecret, lg, time.Now))
+	mux.Handle("/api/", httpapi.NewAdminRouterAt(st, svc, httpapi.Origins{Dashboard: cfg.BaseURL, Agent: cfg.AgentURL}, cfg.ProxySecret, lg, time.Now))
 
 	srv := &http.Server{
-		Addr:              cfg.Listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -177,9 +196,13 @@ func run(lg *slog.Logger) error {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    32 << 10,
 	}
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	lg.Info("fleetguard-server listening", "addr", cfg.Listen)
+	go func() { errc <- srv.Serve(ln) }()
+	lg.Info("fleetguard-server listening", "addr", ln.Addr().String())
 
 	select {
 	case err := <-errc:

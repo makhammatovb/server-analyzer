@@ -115,12 +115,12 @@ func (a *authAPI) createServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, struct {
 		Server serverDTO `json:"server"`
 		enrolTokenDTO
-	}{serverDTO{srv.ID, srv.Name, srv.Note, srv.CreatedAt}, tok})
+	}{serverDTO{ID: srv.ID, Name: srv.Name, Note: srv.Note, CreatedAt: srv.CreatedAt}, tok})
 }
 
 func toFleetDTO(s store.ServerStatus) fleetDTO {
 	return fleetDTO{
-		serverDTO:    serverDTO{s.ID, s.Name, s.Note, s.CreatedAt},
+		serverDTO:    serverDTO{ID: s.ID, Name: s.Name, Note: s.Note, CreatedAt: s.CreatedAt},
 		LastSeenAt:   s.LastSeenAt,
 		AgentVersion: s.AgentVersion,
 		Online:       s.Online,

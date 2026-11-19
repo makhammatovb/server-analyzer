@@ -79,7 +79,7 @@ func TestLoadConfigRejectsABaseURLWithoutAHost(t *testing.T) {
 }
 
 func TestLoadConfigRefusesAgentURLSharingTheDashboardHost(t *testing.T) {
-	for _, agentURL := range []string{"https://fleet.example.test", "https://FLEET.example.test:8443/x"} {
+	for _, agentURL := range []string{"https://fleet.example.test", "https://FLEET.example.test:8443/"} {
 		e := validEnv()
 		e["FG_AGENT_URL"] = agentURL
 		_, err := loadConfig(env(e))
@@ -94,5 +94,32 @@ func TestLoadConfigRejectsAnAgentURLWithoutAHost(t *testing.T) {
 	e["FG_AGENT_URL"] = "agents.example.test"
 	if _, err := loadConfig(env(e)); err == nil {
 		t.Fatal("scheme-less agent URL accepted")
+	}
+}
+
+func TestLoadConfigRefusesUnsafeOrigins(t *testing.T) {
+	bad := map[string]string{
+		"plain http":     "http://%s.example.test",
+		"a path":         "https://%s.example.test/v1",
+		"userinfo":       "https://user:pw@%s.example.test",
+		"a query":        "https://%s.example.test?x=1",
+		"a fragment":     "https://%s.example.test#frag",
+		"shell metachar": "https://%s.example.test;id",
+	}
+	for _, key := range []string{"FG_BASE_URL", "FG_AGENT_URL"} {
+		host := map[string]string{"FG_BASE_URL": "fleet", "FG_AGENT_URL": "agents"}[key]
+		for name, tmpl := range bad {
+			e := validEnv()
+			e[key] = strings.Replace(tmpl, "%s", host, 1)
+			if _, err := loadConfig(env(e)); err == nil {
+				t.Errorf("%s with %s (%q) accepted", key, name, e[key])
+			}
+		}
+		// A bare trailing slash and an explicit port are fine.
+		e := validEnv()
+		e[key] = "https://" + host + ".example.test:8443/"
+		if _, err := loadConfig(env(e)); err != nil {
+			t.Errorf("%s with port and trailing slash: %v", key, err)
+		}
 	}
 }
