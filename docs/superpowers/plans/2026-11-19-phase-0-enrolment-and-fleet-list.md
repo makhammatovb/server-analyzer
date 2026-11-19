@@ -4,7 +4,7 @@
 
 **Goal:** An admin can add a server in the dashboard, run one command on that server, and see the server appear and stay green in a fleet list — over mutual TLS, with no SSH credential ever stored.
 
-**Architecture:** One Go module with two binaries. The agent holds a client certificate issued by the central app's own certificate authority and makes only outbound HTTPS requests. Caddy is the single public listener: it terminates public TLS for the dashboard, requires and verifies a client certificate on the agent hostname, and forwards the certificate DER to the backend, which binds loopback only and re-verifies the chain itself. Postgres with TimescaleDB is the only datastore.
+**Architecture:** One Go module with two binaries. The agent holds a client certificate issued by the central app's own certificate authority and makes only outbound HTTPS requests. Caddy is the single public listener: it terminates public TLS for both hostnames and forwards the client certificate DER to the backend, which binds loopback only and re-verifies the chain itself. The agent hostname uses `verify_if_given` rather than `require_and_verify`, because an agent enrolling for the first time has no certificate yet and an agent whose certificate expired while offline must be able to re-enrol without one; the backend therefore enforces per route — heartbeat demands a verified certificate, enrolment and re-enrolment are authenticated by a single-use token and the enrolment secret respectively. Postgres with TimescaleDB is the only datastore.
 
 **Tech Stack:** Go 1.25 (agent + backend, `net/http` with `ServeMux` method patterns, `pgx/v5`, `goose` migrations, `testcontainers-go`), PostgreSQL + TimescaleDB, React 18 + TypeScript + Vite + TanStack Query + Tailwind, Caddy, Docker Compose.
 
@@ -257,9 +257,13 @@ git add -A && git commit -m "feat(store): server, enrolment token, agent and aud
 
 **Interfaces:**
 - Consumes: `api.*` (Task 1), `*store.Store` (Task 4), `*ca.CA` (Task 3).
-- Produces: `httpapi.NewAgentRouter(st *store.Store, authority *ca.CA, lg *slog.Logger) http.Handler` serving `POST /v1/enrol` and `POST /v1/re-enrol`. Request bodies are read through `http.MaxBytesReader` with `api.MaxBodyBytes`.
+- Produces: `httpapi.NewAgentRouter(st *store.Store, authority *ca.CA, proxySecret string, lg *slog.Logger) http.Handler` serving `POST /v1/enrol` and `POST /v1/re-enrol`, plus `httpapi.RequireProxySecret(secret string)` middleware wrapping **every** `/v1/*` route. Request bodies are read through `http.MaxBytesReader` with `api.MaxBodyBytes`.
 
-Behaviour: `/v1/enrol` consumes the token, signs the CSR for the token's server ID with a 90-day TTL, generates a 32-byte enrolment secret, records the enrolment, audits `agent.enrolled`, and returns `api.EnrolResponse`. `/v1/re-enrol` verifies the enrolment secret for the claimed server ID, signs a fresh certificate, and audits `agent.re-enrolled`; it requires no token and works whether or not the previous certificate has expired. Both refuse a server whose `decommissioned_at` is set.
+**Neither of these two routes requires a client certificate**, and that is not an oversight: an agent enrolling for the first time has none, and an agent whose certificate expired while its server was switched off must be able to re-enrol without one. They are authenticated by the single-use token and by the enrolment secret. What guards them against a local process bypassing Caddy is `RequireProxySecret`, which is why it wraps the whole `/v1/*` tree and not just the heartbeat route — build it here, in the task that creates the router, rather than in Task 7.
+
+Behaviour: `/v1/enrol` consumes the token, signs the CSR for the token's server ID with a 90-day TTL, generates a 32-byte enrolment secret, records the enrolment, audits `agent.enrolled`, and returns `api.EnrolResponse`. The stored hash is built with `store.HashHighEntropySecret`, so it matches what `VerifyEnrolKey` compares against. `/v1/re-enrol` verifies the enrolment secret for the claimed server ID, signs a fresh certificate, and audits `agent.re-enrolled`; it requires no token and works whether or not the previous certificate has expired.
+
+A decommissioned server is refused by the **store** (Ruling 9), which collapses it into `ErrTokenInvalid` for token consumption and `ErrEnrolKeyInvalid` for the secret. The handler therefore answers **401, not 403**: distinguishing the decommissioned case would tell a caller holding a token that it names a real server which merely got retired, which is exactly the fact the indistinguishable error exists to hide. The audit entry records the real reason; the response does not.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -271,7 +275,9 @@ func TestEnrolRejectsReplayedToken(t *testing.T)             // second POST with
 func TestEnrolReplayIsAudited(t *testing.T)                  // audit_log contains action 'agent.enrol_rejected'
 func TestEnrolRejectsExpiredToken(t *testing.T)              // -> 401
 func TestEnrolRejectsOversizedBody(t *testing.T)             // 1 MiB body -> 413
-func TestEnrolRejectsDecommissionedServer(t *testing.T)      // -> 403
+func TestEnrolRejectsDecommissionedServer(t *testing.T)      // -> 401, NOT 403 (see below)
+func TestEnrolRejectsMissingProxySecret(t *testing.T)        // valid token, no X-Proxy-Auth -> 401
+func TestReEnrolRejectsMissingProxySecret(t *testing.T)      // valid secret, no X-Proxy-Auth -> 401
 func TestReEnrolWithValidSecretIssuesNewCert(t *testing.T)   // new fingerprint differs from the first
 func TestReEnrolRejectsWrongSecret(t *testing.T)             // -> 401
 ```
