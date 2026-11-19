@@ -105,7 +105,34 @@ func (r ReEnrolRequest) Validate() error {
 
 // Validate reports a missing or malformed ServerID.
 func (h Heartbeat) Validate() error {
-	return validateUUID("ServerID", h.ServerID)
+	if err := validateUUID("ServerID", h.ServerID); err != nil {
+		return err
+	}
+	if err := validateToken("BootID", h.BootID); err != nil {
+		return err
+	}
+	return validateToken("AgentVersion", h.AgentVersion)
+}
+
+// maxTokenBytes bounds BootID and AgentVersion, which are stored and audited.
+const maxTokenBytes = 64
+
+// validateToken bounds an optional identifier-like field and restricts it to
+// a conservative charset (UUIDs, kernel boot IDs and semver all fit), so it is
+// safe to store and log. An empty value is allowed.
+func validateToken(field, v string) error {
+	if len(v) > maxTokenBytes {
+		return fmt.Errorf("field %s exceeds %d bytes", field, maxTokenBytes)
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '-' || c == '.' || c == '_' || c == '+' || c == ':'
+		if !ok {
+			return fmt.Errorf("field %s contains characters outside [A-Za-z0-9._:+-]", field)
+		}
+	}
+	return nil
 }
 
 func validateUUID(field, v string) error {

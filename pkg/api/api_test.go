@@ -123,6 +123,36 @@ func TestHeartbeatValidate(t *testing.T) {
 	}
 }
 
+func TestHeartbeatValidateBoundsBootIDAndVersion(t *testing.T) {
+	hb := api.Heartbeat{ServerID: "7b0c2f0e-6d1a-4c53-9a63-1f2f4a1f9a10", AgentVersion: "0.1.0+build.5", BootID: "3f2a9c1e-77aa-4d0e-9b1c-0a1b2c3d4e5f"}
+	if err := hb.Validate(); err != nil {
+		t.Fatalf("valid heartbeat rejected: %v", err)
+	}
+	cases := map[string]struct {
+		mutate func(*api.Heartbeat)
+		field  string
+	}{
+		"huge boot id":    {func(h *api.Heartbeat) { h.BootID = strings.Repeat("a", 65) }, "BootID"},
+		"boot id charset": {func(h *api.Heartbeat) { h.BootID = "boot id\n" }, "BootID"},
+		"huge version":    {func(h *api.Heartbeat) { h.AgentVersion = strings.Repeat("1", 65) }, "AgentVersion"},
+		"version charset": {func(h *api.Heartbeat) { h.AgentVersion = "1.0 <x>" }, "AgentVersion"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := hb
+			tc.mutate(&h)
+			if err := h.Validate(); err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("want error naming %s, got %v", tc.field, err)
+			}
+		})
+	}
+	h := hb
+	h.BootID, h.AgentVersion = "", ""
+	if err := h.Validate(); err != nil {
+		t.Fatalf("empty boot id and version must stay valid: %v", err)
+	}
+}
+
 func TestMaxBodyBytesIsSixtyFourKiB(t *testing.T) {
 	if api.MaxBodyBytes != 65536 {
 		t.Fatalf("MaxBodyBytes = %d, want 65536", api.MaxBodyBytes)

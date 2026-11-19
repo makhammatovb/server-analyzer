@@ -60,8 +60,8 @@ func NewAgentRouterAt(st *store.Store, authority *ca.CA, proxySecret string, lg 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrol", a.enrol)
 	mux.HandleFunc("POST /v1/re-enrol", a.reEnrol)
-	mux.Handle("POST /v1/heartbeat",
-		AgentAuth(authority, now)(a.requireCurrentCert(a.rateLimit(http.HandlerFunc(a.heartbeat)))))
+	agentAuth := AgentAuth(authority, st.CertFingerprint, a.limiter, now, a.audit, lg)
+	mux.Handle("POST /v1/heartbeat", agentAuth(http.HandlerFunc(a.heartbeat)))
 	return RequireProxySecret(proxySecret)(mux)
 }
 

@@ -325,3 +325,53 @@ func TestHeartbeatRejectsSupersededCertificate(t *testing.T) {
 		t.Fatalf("current certificate status = %d, want 200", r.StatusCode)
 	}
 }
+
+func TestHeartbeatRejectsOversizedBootID(t *testing.T) {
+	e := newEnv(t)
+	id, out := enrolled(t, e)
+	resp := e.heartbeat(t, hbBody(id, strings.Repeat("a", 1000)), certDER(t, out.CertPEM))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if lastSeen(t, e, id) != nil {
+		t.Fatal("heartbeat with an oversized boot ID was recorded")
+	}
+}
+
+// A certificate that chains to the CA but is no longer current must not be a
+// way to write unbounded audit rows: the limiter runs before the pin.
+func TestSupersededCertificateFloodIsRateLimitedBeforeAudit(t *testing.T) {
+	st := newEnv(t).st
+	authority, err := ca.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(httpapi.NewAgentRouterAt(st, authority, proxySecret, lg, time.Now))
+	t.Cleanup(srv.Close)
+	e := &env{st: st, ca: authority, srv: srv}
+
+	id, first := enrolled(t, e)
+	if r := e.post(t, "/v1/re-enrol", api.ReEnrolRequest{ServerID: id, EnrolKey: first.EnrolKey, CSRPEM: newCSR(t)}, true); r.StatusCode != http.StatusOK {
+		t.Fatalf("re-enrol status = %d", r.StatusCode)
+	}
+	old := certDER(t, first.CertPEM)
+
+	var forbidden, limited int
+	for i := 0; i < 100; i++ {
+		switch e.heartbeat(t, hbBody(id, "b"), old).StatusCode {
+		case http.StatusForbidden:
+			forbidden++
+		case http.StatusTooManyRequests:
+			limited++
+		default:
+			t.Fatal("unexpected status for a superseded certificate")
+		}
+	}
+	if limited == 0 || forbidden > 62 {
+		t.Fatalf("forbidden = %d, limited = %d; the flood was not rate limited", forbidden, limited)
+	}
+	if n := countAudit(t, e, "agent.cert_superseded", id); n != forbidden {
+		t.Fatalf("audit rows = %d, want one per 403 (%d) and none for 429s", n, forbidden)
+	}
+}
