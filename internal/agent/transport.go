@@ -42,6 +42,19 @@ func NewClient(id Identity, cfg Config) *Client {
 	}
 }
 
+// Close releases the client's idle connections. Call it when replacing the
+// client after the identity changes.
+func (c *Client) Close() { c.http.CloseIdleConnections() }
+
+// StatusError is a non-200 response from the server. Callers tell a rejected
+// identity (401), a refused one (403) and a rate limit (429) apart by Code.
+type StatusError struct {
+	Code   int
+	Status string
+}
+
+func (e *StatusError) Error() string { return "server returned " + e.Status }
+
 // SendHeartbeat posts one heartbeat and returns the server's response.
 func (c *Client) SendHeartbeat(ctx context.Context, hb api.Heartbeat) (api.HeartbeatResponse, error) {
 	var out api.HeartbeatResponse
@@ -86,7 +99,7 @@ func postJSON(ctx context.Context, hc *http.Client, url string, body, out any) e
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned %s", resp.Status)
+		return &StatusError{Code: resp.StatusCode, Status: resp.Status}
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, api.MaxBodyBytes)).Decode(out); err != nil {
 		return fmt.Errorf("decode response: %w", err)

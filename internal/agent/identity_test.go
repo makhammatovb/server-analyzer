@@ -393,3 +393,35 @@ func TestEnrolRejectsCAPEMThatDiffersFromPin(t *testing.T) {
 		t.Fatalf("identity persisted after rejected enrolment: %v", err)
 	}
 }
+
+func TestEnrolOrResumeUsesReEnrolWhenTokenAlreadySpent(t *testing.T) {
+	e := newEnv(t)
+	e.enrol(t)
+	if err := os.Remove(filepath.Join(e.cfg.StateDir, "agent.crt")); err != nil {
+		t.Fatal(err)
+	}
+	// A spent token (here: garbage) must not matter; the secrets on disk do.
+	id, err := agent.EnrolOrResume(context.Background(), e.cfg, "spent-token", "host-1", "0.0.1")
+	if err != nil {
+		t.Fatalf("EnrolOrResume: %v", err)
+	}
+	if _, err := agent.LoadIdentity(e.cfg); err != nil || id.ServerID == "" {
+		t.Fatalf("identity not restored: %v", err)
+	}
+}
+
+func TestEnrolOrResumeRefusesWhenAlreadyEnrolled(t *testing.T) {
+	e := newEnv(t)
+	e.enrol(t)
+	_, err := agent.EnrolOrResume(context.Background(), e.cfg, "unused-token", "host-1", "0.0.1")
+	if !errors.Is(err, agent.ErrAlreadyEnrolled) {
+		t.Fatalf("err = %v, want ErrAlreadyEnrolled", err)
+	}
+}
+
+func TestEnrolOrResumeFreshEnrols(t *testing.T) {
+	e := newEnv(t)
+	if _, err := agent.EnrolOrResume(context.Background(), e.cfg, e.token(t), "host-1", "0.0.1"); err != nil {
+		t.Fatalf("EnrolOrResume: %v", err)
+	}
+}
