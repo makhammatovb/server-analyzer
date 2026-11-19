@@ -375,3 +375,39 @@ func TestSupersededCertificateFloodIsRateLimitedBeforeAudit(t *testing.T) {
 		t.Fatalf("audit rows = %d, want one per 403 (%d) and none for 429s", n, forbidden)
 	}
 }
+
+// An attacker flooding with a superseded certificate must not be able to
+// exhaust the live agent's rate limit and silence the server.
+func TestSupersededCertificateFloodDoesNotStarveCurrentCertificate(t *testing.T) {
+	st := newEnv(t).st
+	authority, err := ca.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	frozen := time.Now()
+	srv := httptest.NewServer(httpapi.NewAgentRouterAt(st, authority, proxySecret, lg, func() time.Time { return frozen }))
+	t.Cleanup(srv.Close)
+	e := &env{st: st, ca: authority, srv: srv}
+
+	id, first := enrolled(t, e)
+	resp := e.post(t, "/v1/re-enrol", api.ReEnrolRequest{ServerID: id, EnrolKey: first.EnrolKey, CSRPEM: newCSR(t)}, true)
+	var second api.EnrolResponse
+	if err := json.NewDecoder(resp.Body).Decode(&second); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-enrol: %d, %v", resp.StatusCode, err)
+	}
+	old := certDER(t, first.CertPEM)
+
+	var limited bool
+	for i := 0; i < 100; i++ {
+		if e.heartbeat(t, hbBody(id, "b"), old).StatusCode == http.StatusTooManyRequests {
+			limited = true
+		}
+	}
+	if !limited {
+		t.Fatal("precondition: the superseded certificate's own bucket should be exhausted")
+	}
+	if r := e.heartbeat(t, hbBody(id, "b"), certDER(t, second.CertPEM)); r.StatusCode != http.StatusOK {
+		t.Fatalf("current certificate status = %d, want 200 (the flood must not starve it)", r.StatusCode)
+	}
+}

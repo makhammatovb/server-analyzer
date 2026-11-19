@@ -39,7 +39,9 @@ type AuditFunc func(r *http.Request, action, target string, detail any)
 //     and proves nothing about possession of the private key: that was proven
 //     by the TLS handshake at the reverse proxy, and is trustworthy only
 //     because RequireProxySecret wraps the route and the backend is loopback.
-//  2. Limit: limiter, keyed by that server ID (429 otherwise).
+//  2. Limit: limiter, keyed by that server ID and the presented certificate's
+//     fingerprint (429 otherwise), so a superseded certificate gets its own
+//     bucket and cannot starve the current one.
 //  3. Pin: the certificate's fingerprint must equal the stored one (403 and
 //     an audit entry otherwise). Re-enrolment overwrites the stored value and
 //     there is no CRL, so without this a superseded certificate would keep
@@ -62,13 +64,16 @@ func AgentAuth(authority *ca.CA, lookup FingerprintLookup, limiter *RateLimiter,
 				return
 			}
 
-			if !limiter.Allow(serverID, now()) {
+			// Keyed by (server ID, presented fingerprint), not server ID alone:
+			// the limiter cannot yet know which certificate is current, and a
+			// superseded one must not be able to drain the live agent's bucket.
+			presented := authority.Fingerprint(der)
+			if !limiter.Allow(serverID+"|"+presented, now()) {
 				lg.Warn("httpapi: agent rate limited", "server_id", serverID)
 				writeError(w, http.StatusTooManyRequests)
 				return
 			}
 
-			presented := authority.Fingerprint(der)
 			stored, err := lookup(r.Context(), serverID)
 			if errors.Is(err, store.ErrNotFound) {
 				lg.Warn("httpapi: certificate for a server with no agent", "server_id", serverID)
