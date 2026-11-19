@@ -366,6 +366,8 @@ The certificate arrives in a header because Caddy terminates TLS (Task 12). The 
 
 `AgentAuth` must also reject a server whose `decommissioned_at` or `agents.revoked_at` is set, which is what makes decommissioning in the UI (Task 10) an actual revocation: there is no CRL, and an issued certificate stays cryptographically valid for its full 90 days, so the database is the only revocation checkpoint.
 
+**The store enforces this, not the handler.** `TouchHeartbeat` returns `store.ErrServerInactive` when the server is decommissioned or the agent revoked; `ConsumeEnrolToken` returns `ErrTokenInvalid` for a decommissioned server's token; `VerifyEnrolKey` returns `ErrEnrolKeyInvalid` for a revoked agent. The handler's job is to map `ErrServerInactive` to 403 and audit it — it must not be the only thing standing between a revoked agent and a fresh certificate, because a handler that forgets the check fails open.
+
 A heartbeat whose body `ServerID` differs from the certificate's server ID is rejected with 403 and audited.
 
 - [ ] **Step 1: Write the failing tests**
