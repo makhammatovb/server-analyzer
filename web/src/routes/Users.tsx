@@ -7,7 +7,9 @@ function PendingRow({ user }: { user: User }) {
   const [role, setRole] = useState<'admin' | 'user'>('user')
   const activate = useMutation({
     mutationFn: () => api<void>(`/api/users/${user.id}/activate`, { method: 'POST', body: { role } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+    // onSettled, not onSuccess: if another admin activated this user first the
+    // POST fails (404) and the row is stale, so refresh either way.
+    onSettled: () => qc.invalidateQueries({ queryKey: ['users'] }),
   })
   return (
     <li className="flex items-center gap-3 rounded border p-3">

@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, type FleetRow } from '../api/client'
 import { useMe } from '../auth'
-import { offlineFirst } from '../lib'
+import { offlineFirst, relativeTime } from '../lib'
 import ServerCard from '../components/ServerCard'
 
 export const FLEET_POLL_MS = 15_000
@@ -24,9 +24,11 @@ export default function Fleet() {
   const isAdmin = me.data?.role === 'admin'
 
   if (fleet.isPending) return <p>Loading servers…</p>
-  if (fleet.isError) return <p role="alert" className="text-red-700">Could not load servers. Retrying every 15 seconds.</p>
+  // Only a failure with nothing to show replaces the list. A failed poll keeps
+  // the last known fleet and says it is stale.
+  if (fleet.isError && !fleet.data) return <p role="alert" className="text-red-700">Could not load servers. Retrying every 15 seconds.</p>
 
-  const rows = offlineFirst(fleet.data)
+  const rows = offlineFirst(fleet.data!)
   const offline = rows.filter((r) => !r.online).length
 
   return (
@@ -41,6 +43,11 @@ export default function Fleet() {
               : <span className="font-semibold text-red-700">{offline} offline</span>}
         </p>
       </div>
+      {fleet.isError && (
+        <p role="alert" className="mb-2 rounded border border-amber-400 bg-amber-50 p-2 text-sm">
+          Could not refresh the list; showing the last known state. Last updated {relativeTime(new Date(fleet.dataUpdatedAt).toISOString())}.
+        </p>
+      )}
       {decommission.isError && (
         <p role="alert" className="mb-2 text-sm text-red-700">Decommission failed. The server is still listed.</p>
       )}

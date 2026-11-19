@@ -56,6 +56,26 @@ describe('Users', () => {
   })
 })
 
+describe('Users, concurrent activation', () => {
+  test('a failed activation (another admin got there first) still refreshes the stale row away', async () => {
+    let activated = false
+    server.use(
+      http.get('*/api/users', () =>
+        HttpResponse.json(activated ? [admin, { ...pendingUser, is_active: true }] : [admin, pendingUser]),
+      ),
+      http.post('*/api/users/:id/activate', () => {
+        activated = true // someone else already did it
+        return new HttpResponse(null, { status: 404 })
+      }),
+    )
+    renderWithProviders(<Users />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: /activate/i }))
+
+    await screen.findByText(/no pending registrations/i)
+    expect(screen.queryByRole('button', { name: /^activate$/i })).not.toBeInTheDocument()
+  })
+})
+
 describe('routing', () => {
   test('the Activate control is absent for a non-admin', async () => {
     server.use(
@@ -85,5 +105,19 @@ describe('routing', () => {
     expect(await screen.findByText(/waiting for activation/i)).toBeInTheDocument()
     expect(screen.queryByText(/no servers yet/i)).not.toBeInTheDocument()
     expect(fleetRequested).toBe(false)
+  })
+
+  test('Pending offers a way to sign out', async () => {
+    let loggedOut = false
+    server.use(
+      http.get('*/api/me', () => HttpResponse.json({ ...plainUser, is_active: false })),
+      http.post('*/api/logout', () => {
+        loggedOut = true
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    renderWithProviders(<App />, '/fleet')
+    await userEvent.setup().click(await screen.findByRole('button', { name: /sign out/i }))
+    await waitFor(() => expect(loggedOut).toBe(true))
   })
 })

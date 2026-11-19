@@ -25,6 +25,38 @@ async function fillAndSubmit() {
 }
 
 describe('Login', () => {
+  test('differing 401 responses render byte-identical alerts', async () => {
+    async function alertFor(body: Record<string, unknown>) {
+      server.use(http.post('*/api/login', () => HttpResponse.json(body, { status: 401 })))
+      const view = renderLogin()
+      await fillAndSubmit()
+      const text = (await screen.findByRole('alert')).textContent
+      view.unmount()
+      return text
+    }
+    const unknownUser = await alertFor({ error: 'no such user' })
+    const inactive = await alertFor({ error: 'inactive' })
+    const none = await alertFor({})
+    expect(unknownUser).toBeTruthy()
+    expect(inactive).toBe(unknownUser)
+    expect(none).toBe(unknownUser)
+  })
+
+  test('a server error or an unreachable server is not reported as a wrong password', async () => {
+    server.use(http.post('*/api/login', () => new HttpResponse(null, { status: 500 })))
+    const view = renderLogin()
+    await fillAndSubmit()
+    expect(await screen.findByRole('alert')).toHaveTextContent(/unavailable.*try again/i)
+    expect(screen.queryByText(/check your username and password/i)).not.toBeInTheDocument()
+    view.unmount()
+
+    server.use(http.post('*/api/login', () => HttpResponse.error()))
+    renderLogin()
+    await fillAndSubmit()
+    expect(await screen.findByRole('alert')).toHaveTextContent(/unavailable.*try again/i)
+    expect(screen.queryByText(/check your username and password/i)).not.toBeInTheDocument()
+  })
+
   test('login submits credentials and redirects to /fleet on success', async () => {
     let body: unknown
     server.use(

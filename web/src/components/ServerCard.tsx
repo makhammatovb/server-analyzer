@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import type { FleetRow } from '../api/client'
+import { useMutation } from '@tanstack/react-query'
+import { api, type FleetRow } from '../api/client'
+import InstallCommand from './InstallCommand'
 import { daysUntil, relativeTime } from '../lib'
 
 interface Props {
@@ -19,6 +21,10 @@ function certExpiry(iso: string | null) {
 
 export default function ServerCard({ server, isAdmin, decommissioning, onDecommission }: Props) {
   const [confirming, setConfirming] = useState(false)
+  const reissue = useMutation({
+    mutationFn: () =>
+      api<{ install_command: string; token_expires_at: string }>(`/api/servers/${server.id}/enrol-token`, { method: 'POST' }),
+  })
   const cert = certExpiry(server.cert_not_after)
 
   return (
@@ -39,6 +45,14 @@ export default function ServerCard({ server, isAdmin, decommissioning, onDecommi
         <dt className="text-slate-500">Certificate expires</dt>
         <dd className={cert.warn ? 'font-semibold text-red-700' : ''}>{cert.text}</dd>
       </dl>
+      {isAdmin && reissue.data && (
+        <div className="mt-3 border-t pt-3">
+          <InstallCommand command={reissue.data.install_command} expiresAt={reissue.data.token_expires_at} />
+        </div>
+      )}
+      {isAdmin && reissue.isError && (
+        <p role="alert" className="mt-2 text-sm text-red-700">Could not issue a new install command.</p>
+      )}
       {isAdmin && (
         <div className="mt-3 text-sm">
           {confirming ? (
@@ -59,9 +73,14 @@ export default function ServerCard({ server, isAdmin, decommissioning, onDecommi
               </button>
             </div>
           ) : (
-            <button className="rounded border border-red-700 px-3 py-1 text-red-700" onClick={() => setConfirming(true)}>
-              Decommission
-            </button>
+            <>
+              <button className="mr-2 rounded border px-3 py-1 disabled:opacity-50" disabled={reissue.isPending} onClick={() => reissue.mutate()}>
+                Reissue install command
+              </button>
+              <button className="rounded border border-red-700 px-3 py-1 text-red-700" onClick={() => setConfirming(true)}>
+                Decommission
+              </button>
+            </>
           )}
         </div>
       )}

@@ -1,7 +1,5 @@
 import { Link, Navigate, Outlet, Route, Routes } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
-import { api } from './api/client'
-import { useMe } from './auth'
+import { useLogout, useMe } from './auth'
 import Login from './routes/Login'
 import Register from './routes/Register'
 import Pending from './routes/Pending'
@@ -13,20 +11,11 @@ import Users from './routes/Users'
 // (redirect to /login); here we only decide between the app and Pending.
 function Shell() {
   const me = useMe()
-  const qc = useQueryClient()
+  const logout = useLogout()
   if (me.isPending) return <p className="p-4">Loading…</p>
   if (me.isError) return <p role="alert" className="p-4 text-red-700">Could not reach the server.</p>
   if (!me.data.is_active) return <Pending />
   const isAdmin = me.data.role === 'admin'
-
-  async function logout() {
-    try {
-      await api('/api/logout', { method: 'POST', redirectOn401: false })
-    } finally {
-      qc.clear()
-      window.location.assign('/login')
-    }
-  }
 
   return (
     <div className="mx-auto max-w-3xl p-4">

@@ -13,7 +13,9 @@ function messageFor(err: unknown): string {
   if (err instanceof ApiError && err.status === 503) {
     return 'The server is busy. Please try again in a moment.'
   }
-  return GENERIC
+  if (err instanceof ApiError && err.status === 401) return GENERIC
+  // A 5xx or an unreachable server says nothing about the account.
+  return 'Sign-in is unavailable right now. Please try again shortly.'
 }
 
 export default function Login() {
