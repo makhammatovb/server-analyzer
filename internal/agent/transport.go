@@ -27,6 +27,11 @@ type Client struct {
 // NewClient builds a client that verifies the server against id.CAPool and
 // presents id.Cert as its client certificate.
 func NewClient(id Identity, cfg Config) *Client {
+	// A nil pool would make crypto/tls fall back to the system roots. An empty
+	// pool trusts nothing, so a zero Identity fails closed.
+	if id.CAPool == nil {
+		id.CAPool = x509.NewCertPool()
+	}
 	return &Client{
 		http: newHTTPClient(&tls.Config{
 			Certificates: []tls.Certificate{id.Cert},

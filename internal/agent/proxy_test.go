@@ -119,9 +119,11 @@ func NewTestProxy(t *testing.T, pki *PKI, proxySecret string, backend http.Handl
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	srv.TLS = &tls.Config{
 		Certificates: []tls.Certificate{pki.ServerCert},
-		// Request without verifying, so an expired certificate still reaches
-		// the handler, which is what the backend's own checks are for.
-		ClientAuth: tls.RequestClientCert,
+		// Like Caddy's verify_if_given: no certificate is admitted, but one
+		// that does not verify against the fleet CA (for instance an expired
+		// one) fails the handshake.
+		ClientAuth: tls.VerifyClientCertIfGiven,
+		ClientCAs:  pki.Pool,
 		MinVersion: tls.VersionTLS12,
 	}
 	srv.StartTLS()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/makhammatovb/fleetguard/internal/agent"
 	"github.com/makhammatovb/fleetguard/internal/server/httpapi"
@@ -178,9 +181,11 @@ func TestReEnrolRecoversFromExpiredCertificate(t *testing.T) {
 	e := newEnv(t)
 	enrolled := e.enrol(t)
 
-	// Replace agent.crt with a certificate that expired long ago.
+	// Replace agent.crt with an already expired certificate. The test CA is
+	// minutes old, so a short TTL (not a backdated issue time) keeps the
+	// certificate no older than its issuer.
 	expiredPEM, err := e.pki.CA.Sign(csrFor(t, filepath.Join(e.cfg.StateDir, "agent.key")), enrolled.ServerID,
-		90*24*time.Hour, time.Now().Add(-200*24*time.Hour))
+		30*time.Second, time.Now())
 	if err != nil {
 		t.Fatalf("sign expired: %v", err)
 	}
@@ -194,8 +199,14 @@ func TestReEnrolRecoversFromExpiredCertificate(t *testing.T) {
 	if !stale.NeedsRotation(time.Now()) {
 		t.Fatal("expired identity must need rotation")
 	}
-	if _, err := agent.NewClient(stale, e.cfg).SendHeartbeat(context.Background(), api.Heartbeat{ServerID: stale.ServerID}); err == nil {
+	_, err = agent.NewClient(stale, e.cfg).SendHeartbeat(context.Background(), api.Heartbeat{ServerID: stale.ServerID})
+	if err == nil {
 		t.Fatal("heartbeat with an expired certificate unexpectedly succeeded")
+	}
+	// The proxy rejects it in the handshake, as Caddy's verify_if_given does,
+	// not with an HTTP status: this is why ReEnrol must present no certificate.
+	if strings.Contains(err.Error(), "server returned") {
+		t.Fatalf("expected a handshake failure, got an HTTP response: %v", err)
 	}
 
 	id, err := agent.ReEnrol(context.Background(), e.cfg)
@@ -312,5 +323,73 @@ func TestEnrolRejectsServerNotIssuedByPinnedCA(t *testing.T) {
 	placeCA(t, e.cfg.StateDir, e.pki.CAPEM)
 	if _, err := agent.Enrol(context.Background(), e.cfg, tok, "host-1", "0.0.1"); err != nil {
 		t.Fatalf("enrol with correct pin: %v", err)
+	}
+}
+
+func TestLoadIdentityWithoutCACrtReturnsErrNoCA(t *testing.T) {
+	e := newEnv(t)
+	e.enrol(t)
+	if err := os.Remove(filepath.Join(e.cfg.StateDir, "ca.crt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.LoadIdentity(e.cfg); !errors.Is(err, agent.ErrNoCA) {
+		t.Fatalf("err = %v, want ErrNoCA", err)
+	}
+}
+
+// fakeEnrolBackend answers /v1/enrol with a certificate issued by issuer and
+// the given ca_pem, standing in for a server that is misconfigured or lying.
+func fakeEnrolBackend(t *testing.T, issuer *PKI, caPEM []byte) http.Handler {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/enrol", func(w http.ResponseWriter, r *http.Request) {
+		var req api.EnrolRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		certPEM, err := issuer.CA.Sign(req.CSRPEM, uuid.NewString(), 90*24*time.Hour, time.Now())
+		if err != nil {
+			http.Error(w, "sign", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(api.EnrolResponse{
+			ServerID: uuid.NewString(), CertPEM: certPEM, CAPEM: caPEM, EnrolKey: "k",
+		})
+	})
+	return mux
+}
+
+func TestEnrolRejectsCertificateNotChainingToPin(t *testing.T) {
+	pinned := NewPKI(t)
+	other := NewPKI(t)
+	// ca_pem claims the pinned CA, but the certificate comes from another CA.
+	url := NewTestProxy(t, pinned, proxySecret, fakeEnrolBackend(t, other, pinned.CAPEM))
+	cfg := agent.Config{ServerURL: url, StateDir: filepath.Join(t.TempDir(), "state")}
+	placeCA(t, cfg.StateDir, pinned.CAPEM)
+
+	_, err := agent.Enrol(context.Background(), cfg, "tok", "host-1", "0.0.1")
+	if !errors.Is(err, agent.ErrCertNotPinned) {
+		t.Fatalf("err = %v, want ErrCertNotPinned", err)
+	}
+	if _, err := agent.LoadIdentity(cfg); !errors.Is(err, agent.ErrNoIdentity) {
+		t.Fatalf("identity persisted after rejected enrolment: %v", err)
+	}
+}
+
+func TestEnrolRejectsCAPEMThatDiffersFromPin(t *testing.T) {
+	pinned := NewPKI(t)
+	other := NewPKI(t)
+	// Certificate and ca_pem agree with each other but not with the pin.
+	url := NewTestProxy(t, pinned, proxySecret, fakeEnrolBackend(t, other, other.CAPEM))
+	cfg := agent.Config{ServerURL: url, StateDir: filepath.Join(t.TempDir(), "state")}
+	placeCA(t, cfg.StateDir, pinned.CAPEM)
+
+	_, err := agent.Enrol(context.Background(), cfg, "tok", "host-1", "0.0.1")
+	if !errors.Is(err, agent.ErrCAMismatch) {
+		t.Fatalf("err = %v, want ErrCAMismatch", err)
+	}
+	if _, err := agent.LoadIdentity(cfg); !errors.Is(err, agent.ErrNoIdentity) {
+		t.Fatalf("identity persisted after rejected enrolment: %v", err)
 	}
 }

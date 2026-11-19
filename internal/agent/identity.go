@@ -43,6 +43,13 @@ var ErrNoIdentity = errors.New("agent: no identity")
 // deliberately no fallback to system roots, so a missing pin fails closed.
 var ErrNoCA = errors.New("agent: ca.crt missing or unusable in state directory; the agent trusts only that CA")
 
+var (
+	// ErrCertNotPinned means the issued certificate does not chain to ca.crt.
+	ErrCertNotPinned = errors.New("agent: issued certificate does not chain to the pinned CA")
+	// ErrCAMismatch means the CA the server reported is not the pinned CA.
+	ErrCAMismatch = errors.New("agent: server's CA differs from the pinned ca.crt")
+)
+
 // loadPinnedCA reads ca.crt and returns its PEM and pool.
 func loadPinnedCA(dir string) ([]byte, *x509.CertPool, error) {
 	caPEM, err := readState(dir, fileCA)
@@ -94,6 +101,9 @@ func Enrol(ctx context.Context, cfg Config, token, hostname, version string) (Id
 	}
 	if _, err := uuid.Parse(resp.ServerID); err != nil {
 		return Identity{}, errors.New("agent: enrol: server returned an invalid server id")
+	}
+	if err := checkReportedCA(resp.CAPEM, caPEM); err != nil {
+		return Identity{}, fmt.Errorf("agent: enrol: %w", err)
 	}
 	id, err := buildIdentity(resp.ServerID, resp.CertPEM, keyPEM, caPEM)
 	if err != nil {
@@ -148,6 +158,11 @@ func ReEnrol(ctx context.Context, cfg Config) (Identity, error) {
 	if resp.ServerID != "" && resp.ServerID != string(serverID) {
 		return Identity{}, errors.New("agent: re-enrol: server returned a different server id")
 	}
+	if len(resp.CAPEM) > 0 {
+		if err := checkReportedCA(resp.CAPEM, caPEM); err != nil {
+			return Identity{}, fmt.Errorf("agent: re-enrol: %w", err)
+		}
+	}
 	id, err := buildIdentity(string(serverID), resp.CertPEM, keyPEM, caPEM)
 	if err != nil {
 		return Identity{}, fmt.Errorf("agent: re-enrol: %w", err)
@@ -172,11 +187,11 @@ func LoadIdentity(cfg Config) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	caPEM, err := readState(cfg.StateDir, fileCA)
+	serverID, err := readState(cfg.StateDir, fileServerID)
 	if err != nil {
 		return Identity{}, err
 	}
-	serverID, err := readState(cfg.StateDir, fileServerID)
+	caPEM, _, err := loadPinnedCA(cfg.StateDir)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -197,6 +212,16 @@ func buildIdentity(serverID string, certPEM, keyPEM, caPEM []byte) (Identity, er
 	if err != nil {
 		return Identity{}, err
 	}
+	// Verify at the certificate's own NotBefore, not the wall clock: an
+	// expired certificate must still load so ReEnrol can replace it.
+	_, err = leaf.Verify(x509.VerifyOptions{
+		Roots:       pool,
+		CurrentTime: leaf.NotBefore,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	if err != nil {
+		return Identity{}, fmt.Errorf("%w: %v", ErrCertNotPinned, err)
+	}
 	return Identity{ServerID: serverID, Cert: cert, CAPool: pool, NotAfter: leaf.NotAfter}, nil
 }
 
@@ -206,6 +231,31 @@ func poolFromPEM(caPEM []byte) (*x509.CertPool, error) {
 		return nil, errors.New("no usable CA certificate")
 	}
 	return pool, nil
+}
+
+// checkReportedCA compares the CA the server reported with the pin by parsed
+// certificate, since the PEM bytes differ in trailing whitespace.
+func checkReportedCA(reportedPEM, pinnedPEM []byte) error {
+	reported, err := firstCert(reportedPEM)
+	if err != nil {
+		return fmt.Errorf("%w: server's ca_pem: %v", ErrCAMismatch, err)
+	}
+	pinned, err := firstCert(pinnedPEM)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrNoCA, err)
+	}
+	if !reported.Equal(pinned) {
+		return ErrCAMismatch
+	}
+	return nil
+}
+
+func firstCert(certPEM []byte) (*x509.Certificate, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("no PEM certificate")
+	}
+	return x509.ParseCertificate(block.Bytes)
 }
 
 // newKeyAndCSR generates an ECDSA P-256 key on this host. The CSR carries only

@@ -93,3 +93,11 @@ func TestClientDoesNotSendProxyOrCertHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestNewClientWithZeroIdentityRejectsServer(t *testing.T) {
+	e := newEnv(t)
+	_, err := agent.NewClient(agent.Identity{}, e.cfg).SendHeartbeat(context.Background(), api.Heartbeat{})
+	if err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("err = %v, want a certificate error", err)
+	}
+}
