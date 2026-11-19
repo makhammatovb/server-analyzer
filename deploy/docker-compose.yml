@@ -1,0 +1,20 @@
+# Database service only; the remaining services are added in Task 12.
+# The image tag must match store.TimescaleImage in
+# internal/server/store/store.go.
+services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg16
+    environment:
+      POSTGRES_USER: fleetguard
+      POSTGRES_PASSWORD: ${FG_DB_PASSWORD:?set FG_DB_PASSWORD}
+      POSTGRES_DB: fleetguard
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleetguard -d fleetguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  dbdata:
