@@ -2,9 +2,13 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -55,6 +59,40 @@ func NewTestDB(t *testing.T) *Store {
 	t.Cleanup(s.Close)
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("migrate test database: %v", err)
+	}
+	return s
+}
+
+// NewIsolatedTestDB is NewTestDB for a test that needs a database no other test
+// has written to (for example one asserting "no administrator exists yet"). It
+// creates a fresh, migrated database on the shared container and drops it on
+// cleanup.
+func NewIsolatedTestDB(t *testing.T) *Store {
+	t.Helper()
+	ctx := context.Background()
+	shared := NewTestDB(t)
+
+	name := "iso_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := shared.pool.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatalf("create isolated database: %v", err)
+	}
+	u, err := url.Parse(testDSN)
+	if err != nil {
+		t.Fatalf("parse test dsn: %v", err)
+	}
+	u.Path = "/" + name
+	s, err := Open(ctx, u.String())
+	if err != nil {
+		t.Fatalf("open isolated database: %v", err)
+	}
+	t.Cleanup(func() {
+		s.Close()
+		if _, err := shared.pool.Exec(context.Background(), fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", name)); err != nil {
+			t.Logf("drop isolated database: %v", err)
+		}
+	})
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate isolated database: %v", err)
 	}
 	return s
 }
