@@ -23,6 +23,8 @@ const (
 	uptimePath  = "/proc/uptime"
 	minBackoff  = 5 * time.Second
 	maxBackoff  = 5 * time.Minute
+	minPoll     = 10 * time.Second // bounds on the server-directed poll interval
+	maxPoll     = time.Hour
 	minWait     = time.Second // floor under jitter so a retry never becomes a hot loop
 	maxBackoffN = 16          // doublings beyond this cannot change the capped result
 )
@@ -168,10 +170,10 @@ func (l *loop) tick(ctx context.Context) time.Duration {
 		}
 	}
 
-	_, err := l.client.SendHeartbeat(ctx, l.heartbeat())
+	resp, err := l.client.SendHeartbeat(ctx, l.heartbeat())
 	if err == nil {
 		l.fails, l.reenrolled = 0, false
-		return l.cfg.PollInterval
+		return l.pollInterval(resp.PollIntervalSec)
 	}
 	if ctx.Err() != nil {
 		return 0
@@ -211,6 +213,26 @@ func (l *loop) tick(ctx context.Context) time.Duration {
 	// Transport errors, 429, 5xx and a 401 that survived re-enrolment. A 429 is
 	// deliberately not re-enrolled: the identity is fine.
 	return l.h.jitter(backoffCeiling(l.fails))
+}
+
+// pollInterval is the next wait after a successful heartbeat: the server's
+// requested interval, clamped to [minPoll, maxPoll] so a buggy or hostile
+// response can neither spin the loop nor silence the agent. Zero means the
+// server expressed no preference, so the configured interval applies.
+func (l *loop) pollInterval(serverSec int) time.Duration {
+	if serverSec == 0 {
+		return l.cfg.PollInterval
+	}
+	// Compare in seconds first: converting a huge int to Duration could overflow.
+	switch {
+	case serverSec < int(minPoll/time.Second):
+		l.h.log.Warn("server poll interval below floor, clamped", "requested_sec", serverSec, "used", minPoll)
+		return minPoll
+	case serverSec > int(maxPoll/time.Second):
+		l.h.log.Warn("server poll interval above ceiling, clamped", "requested_sec", serverSec, "used", maxPoll)
+		return maxPoll
+	}
+	return time.Duration(serverSec) * time.Second
 }
 
 func (l *loop) heartbeat() api.Heartbeat {

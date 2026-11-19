@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,7 @@ type runEnv struct {
 	override map[string]func(n int) int // path -> status to force (0 = pass through); n counts requests to that path from 1
 	counts   map[string]int
 	cancel   context.CancelFunc
+	pollSec  *int // when set, heartbeats get this poll_interval_sec instead of the real server's
 }
 
 func newRunEnv(t *testing.T) *runEnv {
@@ -41,7 +43,12 @@ func newRunEnv(t *testing.T) *runEnv {
 		re.counts[r.URL.Path]++
 		n := re.counts[r.URL.Path]
 		f := re.override[r.URL.Path]
+		poll := re.pollSec
 		re.mu.Unlock()
+		if poll != nil && r.URL.Path == hbPath {
+			_, _ = fmt.Fprintf(w, `{"config_version":1,"poll_interval_sec":%d}`, *poll)
+			return
+		}
 		if f != nil {
 			if code := f(n); code != 0 {
 				http.Error(w, http.StatusText(code), code)
@@ -113,7 +120,7 @@ func ceilingJitter(c time.Duration) time.Duration { return c }
 func TestRunSendsHeartbeatEveryInterval(t *testing.T) {
 	re := newRunEnv(t)
 	re.enrol(t)
-	re.cfg.PollInterval = 45 * time.Second
+	re.cfg.PollInterval = 45 * time.Second // the real server answers 30, which wins
 
 	waits, err := re.drive(t, time.Now, 3, ceilingJitter)
 	if !errors.Is(err, context.Canceled) {
@@ -123,8 +130,8 @@ func TestRunSendsHeartbeatEveryInterval(t *testing.T) {
 		t.Errorf("heartbeats = %d, want 3", got)
 	}
 	for i, d := range waits {
-		if d != 45*time.Second {
-			t.Errorf("wait %d = %v, want the 45s poll interval", i, d)
+		if d != 30*time.Second {
+			t.Errorf("wait %d = %v, want the server's 30s poll interval", i, d)
 		}
 	}
 	if got := re.count(rePath); got != 0 {
@@ -401,5 +408,37 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+func TestRunHonoursServerPollInterval(t *testing.T) {
+	cases := []struct {
+		name   string
+		server int
+		want   time.Duration
+	}{
+		{"server value is used", 60, 60 * time.Second},
+		{"zero falls back to the configured interval", 0, 45 * time.Second},
+		{"below the floor is clamped up", 1, 10 * time.Second},
+		{"negative is clamped up", -5, 10 * time.Second},
+		{"above the ceiling is clamped down", 7 * 24 * 3600, time.Hour},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			re := newRunEnv(t)
+			re.enrol(t)
+			re.cfg.PollInterval = 45 * time.Second
+			re.pollSec = &c.server
+
+			waits, err := re.drive(t, time.Now, 2, ceilingJitter)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run err = %v, want context.Canceled (a clamped value is not an error)", err)
+			}
+			for i, d := range waits {
+				if d != c.want {
+					t.Errorf("wait %d = %v, want %v", i, d, c.want)
+				}
+			}
+		})
 	}
 }
