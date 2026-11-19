@@ -12,6 +12,8 @@ type RateLimiter struct {
 	capacity float64
 	perSec   float64
 	buckets  map[string]*bucket
+	// maxKeys is a hard ceiling on tracked keys.
+	maxKeys int
 	// lastSweep is when idle buckets were last evicted.
 	lastSweep time.Time
 }
@@ -28,7 +30,19 @@ type bucket struct {
 // NewRateLimiter allows perMinute requests per key per minute, with a burst of
 // perMinute.
 func NewRateLimiter(perMinute int) *RateLimiter {
+	return NewRateLimiterWithMax(perMinute, defaultMaxKeys)
+}
+
+// defaultMaxKeys bounds memory against callers rotating keys faster than idle
+// buckets age out.
+const defaultMaxKeys = 100_000
+
+// NewRateLimiterWithMax is NewRateLimiter with a ceiling on tracked keys. Past
+// it, a key not already tracked is refused (fail closed) until idle buckets are
+// swept; tracked keys keep working.
+func NewRateLimiterWithMax(perMinute, maxKeys int) *RateLimiter {
 	return &RateLimiter{
+		maxKeys:  maxKeys,
 		capacity: float64(perMinute),
 		perSec:   float64(perMinute) / 60,
 		buckets:  make(map[string]*bucket),
@@ -42,6 +56,11 @@ func (l *RateLimiter) Allow(key string, now time.Time) bool {
 	l.sweep(now)
 	b, ok := l.buckets[key]
 	if !ok {
+		// No forced sweep here: scanning a full map per refused request would
+		// hand an attacker a CPU lever. The periodic sweep above makes room.
+		if len(l.buckets) >= l.maxKeys {
+			return false
+		}
 		b = &bucket{tokens: l.capacity, last: now}
 		l.buckets[key] = b
 	}
@@ -74,6 +93,11 @@ func (l *RateLimiter) sweep(now time.Time) {
 	if now.Sub(l.lastSweep) < sweepInterval {
 		return
 	}
+	l.sweepNow(now)
+}
+
+// sweepNow evicts every bucket that qualifies. The caller holds l.mu.
+func (l *RateLimiter) sweepNow(now time.Time) {
 	l.lastSweep = now
 	for k, b := range l.buckets {
 		idle := now.Sub(b.last)

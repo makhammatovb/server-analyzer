@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,34 +91,112 @@ func TestLoginFailuresAreIndistinguishable(t *testing.T) {
 	}
 }
 
-// An unknown username must cost the same hashing work as a wrong password, or
-// response time discloses which accounts exist.
-func TestLoginUnknownUserCostsAsMuchAsWrongPassword(t *testing.T) {
+// Every failure path must cost one argon2 run: unknown user, wrong password
+// and a correct password on an inactive account alike. Compared two-sided, so
+// a dummy hash that is cheaper OR dearer than a real one is caught.
+func TestLoginFailureTimingIsUniform(t *testing.T) {
 	svc, st := newSvc(t)
 	ctx := context.Background()
-	name := uname()
-	if err := svc.Register(ctx, name, goodPassword); err != nil {
-		t.Fatal(err)
+	active, inactive := uname(), uname()
+	for _, n := range []string{active, inactive} {
+		if err := svc.Register(ctx, n, goodPassword); err != nil {
+			t.Fatal(err)
+		}
 	}
-	u, _, _ := st.GetLoginRecord(ctx, name)
+	u, _, _ := st.GetLoginRecord(ctx, active)
 	if err := svc.Activate(ctx, admin(t, st).ID, u.ID, "user"); err != nil {
 		t.Fatal(err)
 	}
-	fastest := func(username string) time.Duration {
+	fastest := func(username, password string) time.Duration {
 		best := time.Hour
 		for range 3 {
 			start := time.Now()
-			_, _ = svc.Login(ctx, username, "wrong password here", time.Now())
+			_, _ = svc.Login(ctx, username, password, time.Now())
 			best = min(best, time.Since(start))
 		}
 		return best
 	}
-	known, unknown := fastest(name), fastest(uname())
-	if unknown*3 < known {
-		t.Fatalf("unknown-user login took %v, wrong-password login %v: timing leaks account existence", unknown, known)
+	cases := map[string]time.Duration{
+		"wrong password":                    fastest(active, "wrong password here"),
+		"unknown user":                      fastest(uname(), "wrong password here"),
+		"inactive user, correct password":   fastest(inactive, goodPassword),
+		"inactive user, incorrect password": fastest(inactive, "wrong password here"),
+	}
+	lo, hi := time.Hour, time.Duration(0)
+	for _, d := range cases {
+		lo, hi = min(lo, d), max(hi, d)
+	}
+	if hi > 2*lo {
+		t.Fatalf("failure paths differ in cost by more than 2x, which leaks account state: %v", cases)
 	}
 }
 
+func TestLoginRejectsOversizedPasswordWithoutHashing(t *testing.T) {
+	st := store.NewTestDB(t)
+	var calls atomic.Int32
+	svc := auth.New(st, auth.WithHashObserver(func() { calls.Add(1) }))
+	_, err := svc.Login(context.Background(), uname(), strings.Repeat("a", 64*1024), time.Now())
+	if !errors.Is(err, auth.ErrInvalidCredentials) {
+		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("an oversized password reached argon2 (%d runs)", n)
+	}
+}
+
+func TestMaxConcurrentHashesMustBePositive(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("WithMaxConcurrentHashes(0) did not panic")
+		}
+	}()
+	auth.New(store.NewTestDB(t), auth.WithMaxConcurrentHashes(0))
+}
+
+func TestVerifyPasswordRoundTrip(t *testing.T) {
+	h, err := auth.HashPasswordForTest(goodPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auth.VerifyPasswordForTest(goodPassword, h) {
+		t.Fatal("correct password rejected")
+	}
+	if auth.VerifyPasswordForTest("another password!!", h) {
+		t.Fatal("wrong password accepted")
+	}
+}
+
+// A stored hash carries its own parameters, so a corrupted or hostile row must
+// not be able to make verification allocate gigabytes or misbehave.
+func TestVerifyPasswordRefusesUnsafeOrMalformedHashes(t *testing.T) {
+	const tail = "$c2FsdHNhbHRzYWx0c2FsdA$a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2V5a2U"
+	cases := map[string]string{
+		"memory far above our own": "$argon2id$v=19$m=4194304,t=3,p=4" + tail,
+		"memory zero":              "$argon2id$v=19$m=0,t=3,p=4" + tail,
+		"iterations too many":      "$argon2id$v=19$m=65536,t=17,p=4" + tail,
+		"iterations zero":          "$argon2id$v=19$m=65536,t=0,p=4" + tail,
+		"lanes zero":               "$argon2id$v=19$m=65536,t=3,p=0" + tail,
+		"wrong version":            "$argon2id$v=16$m=65536,t=3,p=4" + tail,
+		"wrong algorithm":          "$argon2i$v=19$m=65536,t=3,p=4" + tail,
+		"too few fields":           "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA",
+		"empty":                    "",
+		"garbage":                  "not a hash",
+		"bad salt encoding":        "$argon2id$v=19$m=65536,t=3,p=4$***$a2V5",
+		"empty key":                "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$",
+		"params not numbers":       "$argon2id$v=19$m=x,t=y,p=z" + tail,
+		"lanes overflow uint8":     "$argon2id$v=19$m=65536,t=3,p=300" + tail,
+	}
+	for name, enc := range cases {
+		start := time.Now()
+		if auth.VerifyPasswordForTest(goodPassword, enc) {
+			t.Errorf("%s: verified", name)
+		}
+		// Refusal must be immediate, not after doing the work.
+		if d := time.Since(start); d > 20*time.Millisecond {
+			t.Errorf("%s: took %v, the unsafe parameters were evidently used", name, d)
+		}
+	}
+}
 func TestInactiveUserGetsNoSession(t *testing.T) {
 	svc, st := newSvc(t)
 	ctx := context.Background()

@@ -87,6 +87,9 @@ func (s *Service) hash(password string) (string, error) {
 		return "", err
 	}
 	defer release()
+	if s.observe != nil {
+		s.observe()
+	}
 	return hashPassword(password)
 }
 
@@ -97,6 +100,9 @@ func (s *Service) verify(password, encoded string) (bool, error) {
 		return false, err
 	}
 	defer release()
+	if s.observe != nil {
+		s.observe()
+	}
 	return verifyPassword(password, encoded), nil
 }
 
@@ -105,13 +111,24 @@ type Option func(*Service)
 
 // WithMaxConcurrentHashes caps simultaneous argon2 operations.
 func WithMaxConcurrentHashes(n int) Option {
+	if n < 1 {
+		panic("auth: WithMaxConcurrentHashes needs at least one slot")
+	}
 	return func(s *Service) { s.slots = make(chan struct{}, n) }
 }
+
+// WithHashObserver registers fn to be called while a hashing slot is held.
+//
+// It is a seam for tests (and, later, metrics): it lets a test hold a slot
+// open deterministically.
+func WithHashObserver(fn func()) Option { return func(s *Service) { s.observe = fn } }
 
 // Service is the authentication service.
 type Service struct {
 	st    *store.Store
 	slots chan struct{}
+	// observe, if set, runs while a hashing slot is held.
+	observe func()
 	// dummyHash is verified against when the username is unknown, so that path
 	// does the same hashing work as a real one.
 	dummyHash string
@@ -175,17 +192,19 @@ func (s *Service) Activate(ctx context.Context, adminID, userID, role string) er
 	if err != nil {
 		return err
 	}
-	if err := s.st.ActivateUser(ctx, userID, adminID, role, time.Now().UTC()); err != nil {
-		return err
-	}
-	return s.st.AppendAudit(ctx, adminID, "user.activated", userID,
-		map[string]string{"admin_id": adminID, "user_id": userID, "role": role})
+	// The store writes the audit row in the same transaction.
+	return s.st.ActivateUser(ctx, userID, adminID, role, time.Now().UTC())
 }
 
 // Login verifies the credentials and starts a session, returning the session
 // token. Every failure is ErrInvalidCredentials, and the password is hashed
 // and compared on every path, including an unknown username.
 func (s *Service) Login(ctx context.Context, username, password string, now time.Time) (string, error) {
+	// Same bound as Register, so argon2 is never handed an arbitrarily long
+	// input. Indistinguishable from any other failure.
+	if len(password) > maxPasswordLen {
+		return "", ErrInvalidCredentials
+	}
 	user, hash, err := s.st.GetLoginRecord(ctx, normalizeUsername(username))
 	known := err == nil
 	if err != nil && !errors.Is(err, store.ErrNotFound) {

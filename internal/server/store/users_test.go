@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,5 +170,56 @@ func TestCreateFirstAdminIsRaceSafe(t *testing.T) {
 	}
 	if created != 1 {
 		t.Fatalf("%d concurrent bootstraps succeeded, want exactly 1", created)
+	}
+}
+
+func TestActivateUserWritesAuditRow(t *testing.T) {
+	s := store.NewTestDB(t)
+	ctx := context.Background()
+	admin, _ := s.CreateUser(ctx, uname(), "h", "admin", true)
+	u, _ := s.CreateUser(ctx, uname(), "h", "user", false)
+	if err := s.ActivateUser(ctx, u.ID, admin.ID, "user", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	var actor, detail string
+	err := s.Pool().QueryRow(ctx,
+		`SELECT actor, detail::text FROM audit_log WHERE action = 'user.activated' AND target = $1`, u.ID).
+		Scan(&actor, &detail)
+	if err != nil {
+		t.Fatalf("no audit row: %v", err)
+	}
+	if actor != admin.ID || !strings.Contains(detail, admin.ID) || !strings.Contains(detail, u.ID) {
+		t.Fatalf("audit actor=%q detail=%s lacks both ids", actor, detail)
+	}
+}
+
+// If the audit insert fails the activation must not stand, and a retry must
+// not be told the user is "not found".
+func TestActivateUserIsAtomicWithItsAudit(t *testing.T) {
+	s := store.NewIsolatedTestDB(t)
+	ctx := context.Background()
+	admin, _ := s.CreateUser(ctx, uname(), "h", "admin", true)
+	u, _ := s.CreateUser(ctx, uname(), "h", "user", false)
+	for _, q := range []string{
+		`CREATE FUNCTION refuse_audit() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'audit refused'; END $$ LANGUAGE plpgsql`,
+		`CREATE TRIGGER refuse_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION refuse_audit()`,
+	} {
+		if _, err := s.Pool().Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := s.ActivateUser(ctx, u.ID, admin.ID, "admin", time.Now().UTC())
+	if err == nil || errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("err = %v, want the audit failure", err)
+	}
+	got, _ := s.GetUser(ctx, u.ID)
+	if got.IsActive || got.Role != "user" {
+		t.Fatalf("activation stood without its audit row: %+v", got)
+	}
+	if _, err := s.Pool().Exec(ctx, `DROP TRIGGER refuse_audit ON audit_log`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ActivateUser(ctx, u.ID, admin.ID, "user", time.Now().UTC()); err != nil {
+		t.Fatalf("retry after the audit recovered: %v", err)
 	}
 }

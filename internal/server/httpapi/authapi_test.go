@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -382,33 +383,71 @@ func TestClientAddressComesFromXRealIP(t *testing.T) {
 
 func TestBusyHashingReturns503(t *testing.T) {
 	st := store.NewTestDB(t)
-	svc := auth.New(st, auth.WithMaxConcurrentHashes(1))
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	svc := auth.New(st, auth.WithMaxConcurrentHashes(1), auth.WithHashObserver(func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}))
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
 	h := httpapi.NewAdminRouterAt(st, svc, baseURL, proxySecret, lg, time.Now)
+	post := func(i int) int {
+		r := httptest.NewRequest("POST", "/api/login", strings.NewReader(creds("u-"+uuid.NewString(), "wrong password!!")))
+		r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1", i)
+		r.Header.Set(httpapi.ProxyAuthHeader, proxySecret)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
 
-	const n = 8
-	codes := make(chan int, n)
-	for i := range n {
-		go func() {
-			r := httptest.NewRequest("POST", "/api/login", strings.NewReader(creds("u-"+uuid.NewString(), "wrong password!!")))
-			r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1", i+1)
-			r.Header.Set(httpapi.ProxyAuthHeader, proxySecret)
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, r)
-			codes <- w.Code
-		}()
+	first := make(chan int, 1)
+	go func() { first <- post(1) }()
+	select { // request 1 now holds the only slot, and stays there until released
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the first login never reached the hashing slot")
 	}
-	busy := 0
-	for range n {
-		switch c := <-codes; c {
-		case 503:
-			busy++
-		case 401:
-		default:
-			t.Fatalf("unexpected status %d", c)
+
+	if c := post(2); c != http.StatusServiceUnavailable {
+		t.Fatalf("login while the only hashing slot is busy = %d, want 503", c)
+	}
+	r := httptest.NewRequest("POST", "/api/register", strings.NewReader(creds("u-"+uuid.NewString(), userPW)))
+	r.Header.Set(httpapi.ProxyAuthHeader, proxySecret)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("register while busy = %d, want 503", w.Code)
+	}
+	close(release)
+	if c := <-first; c != http.StatusUnauthorized {
+		t.Fatalf("the held login finished with %d, want 401", c)
+	}
+	if c := post(3); c != http.StatusUnauthorized {
+		t.Fatalf("login after release = %d, want 401", c)
+	}
+}
+
+func TestLogoutClearsCookieEvenWhenSessionIsGone(t *testing.T) {
+	e := newAdminEnv(t)
+	name, _ := e.makeUser(t, "user")
+	ck := e.loginCookie(t, name)
+	e.now = e.now.Add(8 * 24 * time.Hour) // the session has expired
+	for _, cookie := range []string{ck, "garbage", ""} {
+		w := e.do("POST", "/api/logout", "", cookie, "")
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("logout with cookie %q = %d, want 204", cookie, w.Code)
 		}
-	}
-	if busy == 0 {
-		t.Fatal("no request was refused with 503 while one hashing slot served eight concurrent logins")
+		cleared := false
+		for _, c := range w.Result().Cookies() {
+			if c.Name == "fg_session" && c.MaxAge < 0 {
+				cleared = true
+			}
+		}
+		if !cleared {
+			t.Fatalf("logout with cookie %q did not clear the cookie", cookie)
+		}
 	}
 }

@@ -70,7 +70,9 @@ func NewAdminRouterAt(st *store.Store, svc *auth.Service, baseURL, proxySecret s
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/register", a.register)
 	mux.HandleFunc("POST /api/login", a.login)
-	mux.Handle("POST /api/logout", requireUser(http.HandlerFunc(a.logout)))
+	// Deliberately not behind requireUser: logging out must clear the cookie
+	// even when the session has already expired or never existed.
+	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.Handle("GET /api/me", requireUser(http.HandlerFunc(a.me)))
 	mux.Handle("GET /api/users", requireUser(RequireAdmin(http.HandlerFunc(a.listUsers))))
 	mux.Handle("POST /api/users/{id}/activate", requireUser(RequireAdmin(http.HandlerFunc(a.activate))))

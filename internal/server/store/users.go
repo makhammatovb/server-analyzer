@@ -165,13 +165,20 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 }
 
 // ActivateUser activates an inactive user with the given role, recording who
-// did it and when. It returns ErrNotFound if the user does not exist or is
-// already active, so a repeat call cannot silently change a role.
+// did it and when, and writes the "user.activated" audit row (both user IDs) in
+// the same transaction: either the account is active and audited, or neither
+// happened. It returns ErrNotFound if the user does not exist or is already
+// active, so a repeat call cannot silently change a role.
 func (s *Store) ActivateUser(ctx context.Context, userID, adminID, role string, now time.Time) error {
 	if _, err := uuid.Parse(userID); err != nil {
 		return ErrNotFound
 	}
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx,
 		`UPDATE users SET is_active = true, role = $2, activated_at = $3, activated_by = $4
 		 WHERE id = $1 AND NOT is_active`, userID, role, now, adminID)
 	if err != nil {
@@ -179,6 +186,13 @@ func (s *Store) ActivateUser(ctx context.Context, userID, adminID, role string, 
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	if err := appendAudit(ctx, tx, adminID, "user.activated", userID,
+		map[string]string{"admin_id": adminID, "user_id": userID, "role": role}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit activation: %w", err)
 	}
 	return nil
 }
