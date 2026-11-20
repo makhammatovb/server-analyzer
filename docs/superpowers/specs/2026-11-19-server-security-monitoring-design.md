@@ -477,10 +477,12 @@ handling at all.
 one-line command containing a short-lived enrollment token:
 
 ```
-curl -sSL https://central.example/install.sh | sudo bash -s -- --token=<ONE_TIME_TOKEN>
+curl -sSL https://central.example/install.sh | sudo bash -s -- --server-url=<AGENT_ORIGIN>
 ```
 
-The installer verifies the binary signature, installs the agent as a systemd unit,
+The installer prompts for the one-time token on the terminal rather than taking it on the
+command line, because a command line is readable by every local user while the install
+runs. It then verifies the binary signature, installs the agent as a systemd unit,
 enrols it, receives a per-host client certificate, and discards the token. The central
 app never learns an SSH credential.
 

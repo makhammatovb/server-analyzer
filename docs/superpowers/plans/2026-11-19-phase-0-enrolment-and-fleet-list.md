@@ -548,7 +548,14 @@ git add -A && git commit -m "feat(auth): username/password login with admin acti
 - Produces: on the admin router — `POST /api/servers` (admin; body `{name, note}`; returns `{server, install_command, token_expires_at}`), `GET /api/servers` (any user; the fleet list), `GET /api/servers/{id}`, `POST /api/servers/{id}/enrol-token` (admin; issues a fresh token for re-installing), `POST /api/servers/{id}/decommission` (admin; sets `decommissioned_at` and revokes the agent). Plus `cmd/server/main.go`, the `fleetguard-server` binary.
 
 `install_command` is rendered from both origins and the one-time token as:
-`curl -sSL <baseURL>/install.sh | sudo bash -s -- --token=<token> --server-url=<agentURL>`
+`curl -sSL <baseURL>/install.sh | sudo bash -s -- --server-url=<agentURL>`
+
+**The token is deliberately not in this command.** `--token` on a command line is readable
+by every local user through `ps` for as long as the install runs, which is long enough for
+one of them to enrol their own agent as that server. So the API returns the token as a
+separate field, the dashboard shows it in its own block with a copy button, and the
+installer prompts for it on `/dev/tty`. `FG_ENROL_TOKEN` and `--token` remain for
+non-interactive automation, where an operator accepts that trade knowingly.
 
 The installer is fetched from the dashboard origin over publicly trusted TLS — that connection is the agent's root of trust, and it is also where `ca.crt` comes from — while `--server-url` is the **agent** origin, whose certificate the fleet CA issued and the agent pins. Mixing these up is the single easiest way to break every enrolment at once, which is why the binary requires both values explicitly.
 
