@@ -24,6 +24,7 @@ import (
 	"github.com/makhammatovb/fleetguard/internal/agent"
 	"github.com/makhammatovb/fleetguard/internal/server/httpapi"
 	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 	"github.com/makhammatovb/fleetguard/pkg/api"
 )
 
@@ -31,7 +32,7 @@ const proxySecret = "test-proxy-secret" //nolint:gosec // test fixture, not a cr
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if err := store.TerminateTestDB(); err != nil {
+	if err := storetest.TerminateTestDB(); err != nil {
 		fmt.Fprintf(os.Stderr, "terminate test database: %v\n", err)
 		if code == 0 {
 			code = 1
@@ -48,7 +49,7 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	st := store.NewTestDB(t)
+	st := storetest.NewTestDB(t)
 	pki := NewPKI(t)
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router := httpapi.NewAgentRouter(st, pki.CA, proxySecret, lg)

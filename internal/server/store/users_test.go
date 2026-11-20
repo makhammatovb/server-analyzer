@@ -10,12 +10,13 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 )
 
 func uname() string { return "u-" + uuid.NewString() }
 
 func TestCreateUserAndLookup(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	name := uname()
 	u, err := s.CreateUser(ctx, name, "hash-1", "user", false)
@@ -35,7 +36,7 @@ func TestCreateUserAndLookup(t *testing.T) {
 }
 
 func TestCreateUserDuplicate(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	name := uname()
 	if _, err := s.CreateUser(ctx, name, "h", "user", false); err != nil {
@@ -47,7 +48,7 @@ func TestCreateUserDuplicate(t *testing.T) {
 }
 
 func TestActivateUserRecordsWhoAndWhen(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	admin, err := s.CreateUser(ctx, uname(), "h", "admin", true)
 	if err != nil {
@@ -78,7 +79,7 @@ func TestActivateUserRecordsWhoAndWhen(t *testing.T) {
 }
 
 func TestSessionLifecycle(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	u, _ := s.CreateUser(ctx, uname(), "h", "user", true)
 	hash := []byte(uuid.NewString())
@@ -102,7 +103,7 @@ func TestSessionLifecycle(t *testing.T) {
 }
 
 func TestSessionOfInactiveUserIsRejected(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	u, _ := s.CreateUser(ctx, uname(), "h", "user", false)
 	hash := []byte(uuid.NewString())
@@ -116,7 +117,7 @@ func TestSessionOfInactiveUserIsRejected(t *testing.T) {
 }
 
 func TestListUsersIncludesCreated(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	u, _ := s.CreateUser(ctx, uname(), "h", "user", false)
 	all, err := s.ListUsers(ctx)
@@ -132,7 +133,7 @@ func TestListUsersIncludesCreated(t *testing.T) {
 }
 
 func TestCreateFirstAdminOnlyOnce(t *testing.T) {
-	s := store.NewIsolatedTestDB(t)
+	s := storetest.NewIsolatedTestDB(t)
 	ctx := context.Background()
 	if n, err := s.CountAdmins(ctx); err != nil || n != 0 {
 		t.Fatalf("CountAdmins = %d, %v; want 0", n, err)
@@ -150,7 +151,7 @@ func TestCreateFirstAdminOnlyOnce(t *testing.T) {
 }
 
 func TestCreateFirstAdminIsRaceSafe(t *testing.T) {
-	s := store.NewIsolatedTestDB(t)
+	s := storetest.NewIsolatedTestDB(t)
 	ctx := context.Background()
 	const n = 8
 	errs := make(chan error, n)
@@ -174,7 +175,7 @@ func TestCreateFirstAdminIsRaceSafe(t *testing.T) {
 }
 
 func TestActivateUserWritesAuditRow(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	admin, _ := s.CreateUser(ctx, uname(), "h", "admin", true)
 	u, _ := s.CreateUser(ctx, uname(), "h", "user", false)
@@ -196,7 +197,7 @@ func TestActivateUserWritesAuditRow(t *testing.T) {
 // If the audit insert fails the activation must not stand, and a retry must
 // not be told the user is "not found".
 func TestActivateUserIsAtomicWithItsAudit(t *testing.T) {
-	s := store.NewIsolatedTestDB(t)
+	s := storetest.NewIsolatedTestDB(t)
 	ctx := context.Background()
 	admin, _ := s.CreateUser(ctx, uname(), "h", "admin", true)
 	u, _ := s.CreateUser(ctx, uname(), "h", "user", false)

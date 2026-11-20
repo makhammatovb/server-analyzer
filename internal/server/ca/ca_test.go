@@ -432,3 +432,27 @@ func TestProxyDirectoryExposesTheCertPairButNotTheCAKey(t *testing.T) {
 		}
 	}
 }
+
+// A key without its certificate is a half-written pair (the certificate write
+// failed after the key was created). LoadOrCreate must still fail closed, and
+// the error must name the remedy: the operator cannot otherwise tell why first
+// boot is stuck.
+func TestLoadOrCreateHalfWrittenPairNamesTheRemedy(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, keyFile)
+	if err := os.WriteFile(keyPath, []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadOrCreate(dir)
+	if err == nil {
+		t.Fatal("LoadOrCreate succeeded with only a key present")
+	}
+	for _, want := range []string{"half-written", "remove", keyPath} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	if b, _ := os.ReadFile(keyPath); string(b) != "orphan" { //nolint:gosec // test path
+		t.Fatal("the orphaned key was modified; failing closed must not touch it")
+	}
+}

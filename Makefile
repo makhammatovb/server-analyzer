@@ -2,6 +2,7 @@
 
 test:
 	go test ./...
+	cd web && npm test
 
 lint:
 	golangci-lint run ./...

@@ -14,11 +14,12 @@ import (
 
 	"github.com/makhammatovb/fleetguard/internal/server/auth"
 	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 )
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if err := store.TerminateTestDB(); err != nil {
+	if err := storetest.TerminateTestDB(); err != nil {
 		fmt.Fprintf(os.Stderr, "terminate test database: %v\n", err)
 		if code == 0 {
 			code = 1
@@ -33,7 +34,7 @@ func uname() string { return "u-" + uuid.NewString() }
 
 func newSvc(t *testing.T) (*auth.Service, *store.Store) {
 	t.Helper()
-	st := store.NewTestDB(t)
+	st := storetest.NewTestDB(t)
 	return auth.New(st), st
 }
 
@@ -70,7 +71,7 @@ func TestLoginFailuresAreIndistinguishable(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _, _ := st.GetLoginRecord(ctx, active)
-	if err := svc.Activate(ctx, admin(t, st).ID, u.ID, "user"); err != nil {
+	if err := svc.Activate(ctx, admin(t, st).ID, u.ID, "user", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +105,7 @@ func TestLoginFailureTimingIsUniform(t *testing.T) {
 		}
 	}
 	u, _, _ := st.GetLoginRecord(ctx, active)
-	if err := svc.Activate(ctx, admin(t, st).ID, u.ID, "user"); err != nil {
+	if err := svc.Activate(ctx, admin(t, st).ID, u.ID, "user", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	fastest := func(username, password string) time.Duration {
@@ -132,7 +133,7 @@ func TestLoginFailureTimingIsUniform(t *testing.T) {
 }
 
 func TestLoginRejectsOversizedPasswordWithoutHashing(t *testing.T) {
-	st := store.NewTestDB(t)
+	st := storetest.NewTestDB(t)
 	var calls atomic.Int32
 	svc := auth.New(st, auth.WithHashObserver(func() { calls.Add(1) }))
 	_, err := svc.Login(context.Background(), uname(), strings.Repeat("a", 64*1024), time.Now())
@@ -150,7 +151,7 @@ func TestMaxConcurrentHashesMustBePositive(t *testing.T) {
 			t.Fatal("WithMaxConcurrentHashes(0) did not panic")
 		}
 	}()
-	auth.New(store.NewTestDB(t), auth.WithMaxConcurrentHashes(0))
+	auth.New(storetest.NewTestDB(t), auth.WithMaxConcurrentHashes(0))
 }
 
 func TestVerifyPasswordRoundTrip(t *testing.T) {
@@ -224,7 +225,7 @@ func TestActivatedUserCanLogin(t *testing.T) {
 	name := uname()
 	_ = svc.Register(ctx, name, goodPassword)
 	u, _, _ := st.GetLoginRecord(ctx, name)
-	if err := svc.Activate(ctx, admin(t, st).ID, u.ID, "user"); err != nil {
+	if err := svc.Activate(ctx, admin(t, st).ID, u.ID, "user", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -275,7 +276,7 @@ func TestRegisterDoesNotRevealTakenUsername(t *testing.T) {
 	}
 	// The second registration must not have replaced the first password.
 	u, _, _ := st.GetLoginRecord(ctx, name)
-	_ = svc.Activate(ctx, admin(t, st).ID, u.ID, "user")
+	_ = svc.Activate(ctx, admin(t, st).ID, u.ID, "user", time.Now().UTC())
 	if _, err := svc.Login(ctx, name, goodPassword, time.Now()); err != nil {
 		t.Fatalf("original password no longer works: %v", err)
 	}
@@ -305,7 +306,7 @@ func TestActivateRequiresAdmin(t *testing.T) {
 	name := uname()
 	_ = svc.Register(ctx, name, goodPassword)
 	target, _, _ := st.GetLoginRecord(ctx, name)
-	if err := svc.Activate(ctx, plain.ID, target.ID, "user"); !errors.Is(err, auth.ErrForbidden) {
+	if err := svc.Activate(ctx, plain.ID, target.ID, "user", time.Now().UTC()); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
 	}
 	got, _ := st.GetUser(ctx, target.ID)
@@ -314,7 +315,7 @@ func TestActivateRequiresAdmin(t *testing.T) {
 	}
 	// An inactive admin does not count either.
 	dormant, _ := st.CreateUser(ctx, uname(), "x", "admin", false)
-	if err := svc.Activate(ctx, dormant.ID, target.ID, "user"); !errors.Is(err, auth.ErrForbidden) {
+	if err := svc.Activate(ctx, dormant.ID, target.ID, "user", time.Now().UTC()); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("inactive admin err = %v, want ErrForbidden", err)
 	}
 }
@@ -325,7 +326,7 @@ func TestActivateRejectsUnknownRole(t *testing.T) {
 	name := uname()
 	_ = svc.Register(ctx, name, goodPassword)
 	target, _, _ := st.GetLoginRecord(ctx, name)
-	if err := svc.Activate(ctx, admin(t, st).ID, target.ID, "superuser"); !errors.Is(err, auth.ErrInvalidInput) {
+	if err := svc.Activate(ctx, admin(t, st).ID, target.ID, "superuser", time.Now().UTC()); !errors.Is(err, auth.ErrInvalidInput) {
 		t.Fatalf("err = %v, want ErrInvalidInput", err)
 	}
 }
@@ -337,7 +338,7 @@ func TestActivateIsAudited(t *testing.T) {
 	name := uname()
 	_ = svc.Register(ctx, name, goodPassword)
 	target, _, _ := st.GetLoginRecord(ctx, name)
-	if err := svc.Activate(ctx, adm.ID, target.ID, "user"); err != nil {
+	if err := svc.Activate(ctx, adm.ID, target.ID, "user", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	var actor, tgt, detail string
@@ -358,7 +359,7 @@ func TestSessionExpires(t *testing.T) {
 	name := uname()
 	_ = svc.Register(ctx, name, goodPassword)
 	u, _, _ := st.GetLoginRecord(ctx, name)
-	_ = svc.Activate(ctx, admin(t, st).ID, u.ID, "user")
+	_ = svc.Activate(ctx, admin(t, st).ID, u.ID, "user", time.Now().UTC())
 	now := time.Now()
 	tok, err := svc.Login(ctx, name, goodPassword, now)
 	if err != nil {
@@ -387,7 +388,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 	name := uname()
 	_ = svc.Register(ctx, name, goodPassword)
 	u, _, _ := st.GetLoginRecord(ctx, name)
-	_ = svc.Activate(ctx, admin(t, st).ID, u.ID, "user")
+	_ = svc.Activate(ctx, admin(t, st).ID, u.ID, "user", time.Now().UTC())
 	now := time.Now()
 	tok, _ := svc.Login(ctx, name, goodPassword, now)
 	if err := svc.Logout(ctx, tok); err != nil {
@@ -399,7 +400,7 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 }
 
 func TestBootstrapOnlyWhenNoAdminsExist(t *testing.T) {
-	st := store.NewIsolatedTestDB(t)
+	st := storetest.NewIsolatedTestDB(t)
 	svc := auth.New(st)
 	ctx := context.Background()
 	if n, err := svc.CountAdmins(ctx); err != nil || n != 0 {
@@ -423,7 +424,7 @@ func TestBootstrapOnlyWhenNoAdminsExist(t *testing.T) {
 }
 
 func TestHashingBeyondTheConcurrencyCapIsRefused(t *testing.T) {
-	st := store.NewTestDB(t)
+	st := storetest.NewTestDB(t)
 	svc := auth.New(st, auth.WithMaxConcurrentHashes(1))
 	ctx := context.Background()
 	release := svc.HoldSlotForTest()

@@ -181,7 +181,7 @@ func (s *Service) Register(ctx context.Context, username, password string) error
 
 // Activate makes userID an active account with role. adminID must be an active
 // administrator. The activation is audited with both IDs.
-func (s *Service) Activate(ctx context.Context, adminID, userID, role string) error {
+func (s *Service) Activate(ctx context.Context, adminID, userID, role string, now time.Time) error {
 	if role != RoleAdmin && role != RoleUser {
 		return ErrInvalidInput
 	}
@@ -193,7 +193,7 @@ func (s *Service) Activate(ctx context.Context, adminID, userID, role string) er
 		return err
 	}
 	// The store writes the audit row in the same transaction.
-	return s.st.ActivateUser(ctx, userID, adminID, role, time.Now().UTC())
+	return s.st.ActivateUser(ctx, userID, adminID, role, now.UTC())
 }
 
 // Login verifies the credentials and starts a session, returning the session

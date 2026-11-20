@@ -321,10 +321,33 @@ func writeAtomic(path string, data []byte) (err error) {
 		_ = tmp.Close()
 		return err
 	}
+	// Flush the data before the rename: otherwise a power loss can leave the
+	// new name pointing at an empty file, and a host returning from an outage
+	// would report "not enrolled" and need a fresh token from an admin.
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err = os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir flushes a directory so a rename into it survives power loss.
+func syncDir(dir string) error {
+	d, err := os.Open(dir) //nolint:gosec // the agent's own state directory
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 func readState(dir, name string) ([]byte, error) {

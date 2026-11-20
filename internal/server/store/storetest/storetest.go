@@ -1,4 +1,7 @@
-package store
+// Package storetest provides a TimescaleDB test container for tests. It lives
+// outside package store so that testing and testcontainers-go are never linked
+// into the production binaries; import it only from _test.go files.
+package storetest
 
 import (
 	"context"
@@ -9,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/makhammatovb/fleetguard/internal/server/store"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -30,12 +34,12 @@ var (
 //
 // Tests sharing the container must not assume an empty database beyond the
 // schema; use unique names for the rows they insert.
-func NewTestDB(t *testing.T) *Store {
+func NewTestDB(t *testing.T) *store.Store {
 	t.Helper()
 	ctx := context.Background()
 
 	testOnce.Do(func() {
-		c, err := postgres.Run(ctx, TimescaleImage,
+		c, err := postgres.Run(ctx, store.TimescaleImage,
 			postgres.WithDatabase("fleetguard"),
 			postgres.WithUsername("fleetguard"),
 			postgres.WithPassword("fleetguard"),
@@ -52,7 +56,7 @@ func NewTestDB(t *testing.T) *Store {
 		t.Fatalf("start test database: %v", testErr)
 	}
 
-	s, err := Open(ctx, testDSN)
+	s, err := store.Open(ctx, testDSN)
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -67,13 +71,13 @@ func NewTestDB(t *testing.T) *Store {
 // has written to (for example one asserting "no administrator exists yet"). It
 // creates a fresh, migrated database on the shared container and drops it on
 // cleanup.
-func NewIsolatedTestDB(t *testing.T) *Store {
+func NewIsolatedTestDB(t *testing.T) *store.Store {
 	t.Helper()
 	ctx := context.Background()
 	shared := NewTestDB(t)
 
 	name := "iso_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := shared.pool.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+	if _, err := shared.Pool().Exec(ctx, "CREATE DATABASE "+name); err != nil {
 		t.Fatalf("create isolated database: %v", err)
 	}
 	u, err := url.Parse(testDSN)
@@ -81,13 +85,13 @@ func NewIsolatedTestDB(t *testing.T) *Store {
 		t.Fatalf("parse test dsn: %v", err)
 	}
 	u.Path = "/" + name
-	s, err := Open(ctx, u.String())
+	s, err := store.Open(ctx, u.String())
 	if err != nil {
 		t.Fatalf("open isolated database: %v", err)
 	}
 	t.Cleanup(func() {
 		s.Close()
-		if _, err := shared.pool.Exec(context.Background(), fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", name)); err != nil {
+		if _, err := shared.Pool().Exec(context.Background(), fmt.Sprintf("DROP DATABASE %s WITH (FORCE)", name)); err != nil {
 			t.Logf("drop isolated database: %v", err)
 		}
 	})

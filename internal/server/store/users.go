@@ -187,7 +187,7 @@ func (s *Store) ActivateUser(ctx context.Context, userID, adminID, role string, 
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	if err := appendAudit(ctx, tx, adminID, "user.activated", userID,
+	if err := appendAudit(ctx, tx, now, adminID, "user.activated", userID,
 		map[string]string{"admin_id": adminID, "user_id": userID, "role": role}); err != nil {
 		return err
 	}

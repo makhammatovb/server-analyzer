@@ -307,7 +307,7 @@ func (a *authAPI) activate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err := a.svc.Activate(r.Context(), admin.ID, r.PathValue("id"), body.Role)
+	err := a.svc.Activate(r.Context(), admin.ID, r.PathValue("id"), body.Role, a.now().UTC())
 	switch {
 	case errors.Is(err, auth.ErrInvalidInput):
 		writeError(w, http.StatusBadRequest)

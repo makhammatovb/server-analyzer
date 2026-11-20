@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 )
 
 func enrolAgent(t *testing.T, s *store.Store, secret string) string {
@@ -31,7 +32,7 @@ func enrolAgent(t *testing.T, s *store.Store, secret string) string {
 }
 
 func TestVerifyEnrolKeyRejectsWrongKey(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "right-secret")
 
@@ -47,7 +48,7 @@ func TestVerifyEnrolKeyRejectsWrongKey(t *testing.T) {
 }
 
 func TestRecordEnrolmentUpsertsOnServerID(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "first")
 	err := s.RecordEnrolment(ctx, store.Enrolment{
@@ -67,7 +68,7 @@ func TestRecordEnrolmentUpsertsOnServerID(t *testing.T) {
 }
 
 func TestTouchHeartbeatReportsBootIDChange(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "k")
 	at := time.Now().UTC().Truncate(time.Microsecond)
@@ -104,15 +105,15 @@ func TestTouchHeartbeatReportsBootIDChange(t *testing.T) {
 }
 
 func TestAppendAuditStoresDetailAsJSON(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	target := "server:" + uuid.NewString()
 
 	detail := map[string]any{"hostname": "web-1", "attempts": 2}
-	if err := s.AppendAudit(ctx, "agent", "enrol", target, detail); err != nil {
+	if err := s.AppendAudit(ctx, time.Now().UTC(), "agent", "enrol", target, detail); err != nil {
 		t.Fatalf("AppendAudit: %v", err)
 	}
-	if err := s.AppendAudit(ctx, "agent", "enrol-nil", target, nil); err != nil {
+	if err := s.AppendAudit(ctx, time.Now().UTC(), "agent", "enrol_nil", target, nil); err != nil {
 		t.Fatalf("AppendAudit nil detail: %v", err)
 	}
 
@@ -132,7 +133,7 @@ func TestAppendAuditStoresDetailAsJSON(t *testing.T) {
 	}
 	var nilDetail string
 	if err := s.Pool().QueryRow(ctx,
-		`SELECT detail::text FROM audit_log WHERE target = $1 AND action = 'enrol-nil'`, target).
+		`SELECT detail::text FROM audit_log WHERE target = $1 AND action = 'enrol_nil'`, target).
 		Scan(&nilDetail); err != nil || nilDetail != "{}" {
 		t.Fatalf("nil detail = %q, %v; want {}", nilDetail, err)
 	}
@@ -155,7 +156,7 @@ func decommission(t *testing.T, s *store.Store, id string) {
 }
 
 func TestRevokedAgentIsRefused(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "k")
 	revoke(t, s, id)
@@ -169,7 +170,7 @@ func TestRevokedAgentIsRefused(t *testing.T) {
 }
 
 func TestDecommissionedServerIsRefused(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	id := enrolAgent(t, s, "k")
@@ -191,7 +192,7 @@ func TestDecommissionedServerIsRefused(t *testing.T) {
 }
 
 func TestRecordEnrolmentClearsRevocation(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "old")
 	revoke(t, s, id)
@@ -211,7 +212,7 @@ func TestRecordEnrolmentClearsRevocation(t *testing.T) {
 }
 
 func TestTouchHeartbeatKeepsVersionWhenEmpty(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "k")
 	if _, err := s.TouchHeartbeat(ctx, id, "", "b", time.Now()); err != nil {
@@ -227,7 +228,7 @@ func TestTouchHeartbeatKeepsVersionWhenEmpty(t *testing.T) {
 }
 
 func TestRecordCertRotationUpdatesOnlyCertColumns(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "rot")
 	notAfter := time.Now().Add(90 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
@@ -255,7 +256,7 @@ func TestRecordCertRotationUpdatesOnlyCertColumns(t *testing.T) {
 }
 
 func TestRecordCertRotationNotFound(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	if err := s.RecordCertRotation(ctx, uuid.NewString(), "fp", time.Now()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown server err = %v, want ErrNotFound", err)
@@ -270,7 +271,7 @@ func TestRecordCertRotationNotFound(t *testing.T) {
 }
 
 func TestRecordCertRotationRefusesInactive(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	for name, deactivate := range map[string]func(*testing.T, *store.Store, string){
 		"revoked": revoke, "decommissioned": decommission,
@@ -291,7 +292,7 @@ func TestRecordCertRotationRefusesInactive(t *testing.T) {
 }
 
 func TestCertFingerprintReturnsStoredValue(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	id := enrolAgent(t, s, "secret")
 	got, err := s.CertFingerprint(ctx, id)
@@ -303,5 +304,26 @@ func TestCertFingerprintReturnsStoredValue(t *testing.T) {
 	}
 	if _, err := s.CertFingerprint(ctx, "not-a-uuid"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("bad id err = %v, want ErrNotFound", err)
+	}
+}
+
+// The audit timestamp is the caller's, not the store's: it must come from the
+// same injected clock as every other column, and it decides hypertable chunk
+// placement.
+func TestAppendAuditStampsTheGivenTime(t *testing.T) {
+	s := storetest.NewTestDB(t)
+	ctx := context.Background()
+	target := "server:" + uuid.NewString()
+	at := time.Date(2031, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	if err := s.AppendAudit(ctx, at, "agent", "clock-check", target, nil); err != nil {
+		t.Fatalf("AppendAudit: %v", err)
+	}
+	var got time.Time
+	if err := s.Pool().QueryRow(ctx, `SELECT at FROM audit_log WHERE target = $1`, target).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(at) {
+		t.Fatalf("audit at = %v, want the injected %v", got, at)
 	}
 }

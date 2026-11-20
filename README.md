@@ -129,11 +129,40 @@ docker compose --env-file .env -f deploy/docker-compose.yml exec caddy caddy rel
 Do not `restart caddy`: the server shares its network namespace and must be
 restarted with it. Also reload after changing `FG_AGENT_URL`.
 
+### The CA's own expiry
+
+The fleet CA is generated on first boot with a **10-year** validity and has no
+automatic renewal. On the day it expires `Verify` returns `ErrExpired`, every
+agent gets 401, and re-enrolment issues certificates that fail to verify too,
+so no agent can recover by itself. Note the date (`openssl x509 -enddate -noout
+-in <state dir>/ca.crt`) and plan a CA rotation, which re-enrols every agent,
+well before it.
+
 ### The agent service
 
 `deploy/fleetguard-agent.service` uses `Restart=always`: the agent exits at once,
 with no retry, on a transient local-state error (an EIO, a `/var/lib` not yet
 mounted), and any weaker policy turns a mount race into a permanent blind spot.
+
+## Dashboard development
+
+The backend refuses every `/api` request that lacks the proxy secret, so the
+Vite dev server (`npm run dev`) stands in for Caddy: it forwards `/api` to the
+backend and adds `X-Proxy-Auth` and the backend's own `Origin`. Both come from
+the environment and are read when the dev server starts:
+
+```sh
+# terminal 1: the backend, with its usual FG_* settings, listening on 127.0.0.1:8080
+# terminal 2:
+cd web
+FG_PROXY_SECRET=<the backend's FG_PROXY_SECRET> \
+FG_BASE_URL=<the backend's FG_BASE_URL> \
+npm run dev          # http://localhost:5173
+```
+
+`FG_DEV_BACKEND` overrides the backend address (default `http://127.0.0.1:8080`).
+The session cookie is `Secure`; Chrome and Firefox accept it on `localhost`,
+Safari does not. The server-side agent endpoints (`/v1/*`) are not proxied.
 
 ## Toolchain
 
@@ -144,6 +173,7 @@ with Go 1.25 will not build.
 ## Tests
 
 ```sh
+make test                         # both of the next two lines
 go test ./...                     # unit and store tests (testcontainers; needs Docker)
 (cd web && npm test)
 go test ./test/e2e/ -v            # the whole stack, a real agent in a container; a few minutes

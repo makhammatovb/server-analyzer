@@ -123,6 +123,12 @@ func LoadOrCreate(dir string) (*CA, error) {
 		return Load(certPEM, keyPEM)
 	case errors.Is(certErr, os.ErrNotExist) && errors.Is(keyErr, os.ErrNotExist):
 		// fall through to create
+	case certErr == nil && errors.Is(keyErr, os.ErrNotExist):
+		return nil, fmt.Errorf("ca: %s exists but %s does not: the CA pair is half-written; "+
+			"if this is a first boot that failed part-way, remove the orphaned %s and start again", certPath, keyPath, certPath)
+	case keyErr == nil && errors.Is(certErr, os.ErrNotExist):
+		return nil, fmt.Errorf("ca: %s exists but %s does not: the CA pair is half-written "+
+			"(the certificate write failed after the key was created); remove the orphaned %s and start again", keyPath, certPath, keyPath)
 	default:
 		return nil, fmt.Errorf("ca: read existing CA files: cert: %v, key: %v", certErr, keyErr)
 	}

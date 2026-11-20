@@ -73,7 +73,7 @@ func (a *authAPI) issueToken(r *http.Request, actorID, serverID string) (enrolTo
 	if err != nil {
 		return enrolTokenDTO{}, err
 	}
-	if err := a.st.AppendAudit(r.Context(), actorID, "server.enrol_token_issued", serverID, nil); err != nil {
+	if err := a.st.AppendAudit(r.Context(), now, actorID, "server.enrol_token_issued", serverID, nil); err != nil {
 		a.lg.Error("httpapi: audit append failed", "action", "server.enrol_token_issued", "err", err)
 	}
 	return enrolTokenDTO{InstallCommand: a.installCommand(), Token: token, TokenExpiresAt: now.Add(enrolTokenTTL)}, nil
@@ -107,7 +107,7 @@ func (a *authAPI) createServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError)
 		return
 	}
-	if err := a.st.AppendAudit(r.Context(), admin.ID, "server.created", srv.ID, map[string]string{"name": srv.Name}); err != nil {
+	if err := a.st.AppendAudit(r.Context(), a.now(), admin.ID, "server.created", srv.ID, map[string]string{"name": srv.Name}); err != nil {
 		a.lg.Error("httpapi: audit append failed", "action", "server.created", "err", err)
 	}
 	tok, err := a.issueToken(r, admin.ID, srv.ID)

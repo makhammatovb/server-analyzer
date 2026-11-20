@@ -25,6 +25,7 @@ import (
 	"github.com/makhammatovb/fleetguard/internal/server/ca"
 	"github.com/makhammatovb/fleetguard/internal/server/httpapi"
 	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 	"github.com/makhammatovb/fleetguard/pkg/api"
 )
 
@@ -32,7 +33,7 @@ const proxySecret = "test-proxy-secret" //nolint:gosec // test fixture, not a cr
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if err := store.TerminateTestDB(); err != nil {
+	if err := storetest.TerminateTestDB(); err != nil {
 		fmt.Fprintf(os.Stderr, "terminate test database: %v\n", err)
 		if code == 0 {
 			code = 1
@@ -47,15 +48,17 @@ type env struct {
 	srv *httptest.Server
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvAt(t, time.Now) }
+
+func newEnvAt(t *testing.T, now func() time.Time) *env {
 	t.Helper()
-	st := store.NewTestDB(t)
+	st := storetest.NewTestDB(t)
 	authority, err := ca.LoadOrCreate(t.TempDir())
 	if err != nil {
 		t.Fatalf("ca: %v", err)
 	}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(httpapi.NewAgentRouter(st, authority, proxySecret, lg))
+	srv := httptest.NewServer(httpapi.NewAgentRouterAt(st, authority, proxySecret, lg, now))
 	t.Cleanup(srv.Close)
 	return &env{st: st, ca: authority, srv: srv}
 }
@@ -379,8 +382,8 @@ func TestReEnrolWithValidSecretIssuesNewCert(t *testing.T) {
 	if oldFP == newFP {
 		t.Fatal("re-enrolment returned the same certificate")
 	}
-	if countAudit(t, e, "agent.re-enrolled", id) != 1 {
-		t.Fatal("agent.re-enrolled not audited")
+	if countAudit(t, e, "agent.reenrolled", id) != 1 {
+		t.Fatal("agent.reenrolled not audited")
 	}
 	var fp string
 	var notAfter time.Time

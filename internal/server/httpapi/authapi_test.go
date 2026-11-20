@@ -18,6 +18,7 @@ import (
 	"github.com/makhammatovb/fleetguard/internal/server/auth"
 	"github.com/makhammatovb/fleetguard/internal/server/httpapi"
 	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 )
 
 const (
@@ -35,7 +36,7 @@ type adminEnv struct {
 
 func newAdminEnv(t *testing.T) *adminEnv {
 	t.Helper()
-	st := store.NewTestDB(t)
+	st := storetest.NewTestDB(t)
 	svc := auth.New(st)
 	e := &adminEnv{st: st, svc: svc, now: time.Now()}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -80,7 +81,7 @@ func (e *adminEnv) makeUser(t *testing.T, role string) (name, id string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.svc.Activate(ctx, adm.ID, u.ID, role); err != nil {
+	if err := e.svc.Activate(ctx, adm.ID, u.ID, role, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	return name, u.ID
@@ -383,7 +384,7 @@ func TestClientAddressComesFromXRealIP(t *testing.T) {
 }
 
 func TestBusyHashingReturns503(t *testing.T) {
-	st := store.NewTestDB(t)
+	st := storetest.NewTestDB(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	svc := auth.New(st, auth.WithMaxConcurrentHashes(1), auth.WithHashObserver(func() {

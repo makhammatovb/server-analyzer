@@ -30,6 +30,13 @@ const unknownTarget = "unknown"
 // 2/min an agent actually sends.
 const heartbeatsPerMinute = 60
 
+// enrolPerMinute is the per-address budget shared by /v1/enrol and
+// /v1/re-enrol. A real enrolment is one request, and an admin enrols one server
+// at a time; ten (also the burst) leaves room for installer retries and a few
+// servers behind one NAT address, while capping a hostile address at ten
+// signature checks, database writes and audit rows a minute.
+const enrolPerMinute = 10
+
 // pollIntervalSec is how often agents are told to heartbeat.
 const pollIntervalSec = 30
 
@@ -39,13 +46,18 @@ type agentAPI struct {
 	lg      *slog.Logger
 	now     func() time.Time
 	limiter *RateLimiter
+	// enrolLimiter limits the certificate-less routes by client address.
+	enrolLimiter *RateLimiter
+	proxySecret  string
 }
 
 // NewAgentRouter serves the agent-facing API. Every /v1/* route requires the
 // proxy secret. /v1/enrol and /v1/re-enrol deliberately require no client
 // certificate: a first-time agent has none, and one whose certificate expired
 // while its server was off must still be able to re-enrol. They are
-// authenticated by the single-use token and the enrolment secret respectively.
+// authenticated by the single-use token and the enrolment secret respectively,
+// and, having no certificate to key a limiter on, are limited per client
+// address.
 func NewAgentRouter(st *store.Store, authority *ca.CA, proxySecret string, lg *slog.Logger) http.Handler {
 	return NewAgentRouterAt(st, authority, proxySecret, lg, time.Now)
 }
@@ -56,17 +68,35 @@ func NewAgentRouter(st *store.Store, authority *ca.CA, proxySecret string, lg *s
 // certificate to be the one currently on record, and stays within the
 // per-server rate limit.
 func NewAgentRouterAt(st *store.Store, authority *ca.CA, proxySecret string, lg *slog.Logger, now func() time.Time) http.Handler {
-	a := &agentAPI{st: st, ca: authority, lg: lg, now: now, limiter: NewRateLimiter(heartbeatsPerMinute)}
+	a := &agentAPI{st: st, ca: authority, lg: lg, now: now, limiter: NewRateLimiter(heartbeatsPerMinute),
+		enrolLimiter: NewRateLimiter(enrolPerMinute), proxySecret: proxySecret}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/enrol", a.enrol)
-	mux.HandleFunc("POST /v1/re-enrol", a.reEnrol)
+	mux.HandleFunc("POST /v1/enrol", a.limitByAddress(a.enrol))
+	mux.HandleFunc("POST /v1/re-enrol", a.limitByAddress(a.reEnrol))
 	agentAuth := AgentAuth(authority, st.CertFingerprint, a.limiter, now, a.audit, lg)
 	mux.Handle("POST /v1/heartbeat", agentAuth(http.HandlerFunc(a.heartbeat)))
 	return RequireProxySecret(proxySecret)(mux)
 }
 
+// limitByAddress rate-limits a route that needs no certificate by client
+// address, before the handler's signature check, database write and audit row.
+// A limited request is deliberately not audited: writing a row per flooded
+// request is the amplification this exists to prevent. Both enrolment routes
+// share one budget per address, so alternating between them gains nothing.
+func (a *agentAPI) limitByAddress(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r, a.proxySecret)
+		if !a.enrolLimiter.Allow(ip, a.now()) {
+			a.lg.Warn("httpapi: enrolment rate limited", "ip", ip, "path", r.URL.Path)
+			writeError(w, http.StatusTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (a *agentAPI) audit(r *http.Request, action, target string, detail any) {
-	if err := a.st.AppendAudit(r.Context(), auditActor, action, target, detail); err != nil {
+	if err := a.st.AppendAudit(r.Context(), a.now(), auditActor, action, target, detail); err != nil {
 		a.lg.Error("httpapi: audit append failed", "action", action, "err", err)
 	}
 }
@@ -219,7 +249,7 @@ func (a *agentAPI) reEnrol(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError)
 		return
 	}
-	a.audit(r, "agent.re-enrolled", req.ServerID, map[string]string{"cert_fingerprint": fingerprint})
+	a.audit(r, "agent.reenrolled", req.ServerID, map[string]string{"cert_fingerprint": fingerprint})
 	// The enrolment secret is unchanged and is not returned again.
 	writeJSON(w, http.StatusOK, api.EnrolResponse{
 		ServerID: req.ServerID,

@@ -186,7 +186,7 @@ func (s *Store) DecommissionServer(ctx context.Context, serverID, actor string, 
 		`UPDATE agents SET revoked_at = COALESCE(revoked_at, $2) WHERE server_id = $1`, serverID, now); err != nil {
 		return fmt.Errorf("store: revoke agent: %w", err)
 	}
-	if err := appendAudit(ctx, tx, actor, "server.decommissioned", serverID, nil); err != nil {
+	if err := appendAudit(ctx, tx, now, actor, "server.decommissioned", serverID, nil); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 )
 
 // TestMain terminates the shared container once, after every test has run.
@@ -16,7 +16,7 @@ import (
 // from m.Run() is preserved even when tests fail.
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if err := store.TerminateTestDB(); err != nil {
+	if err := storetest.TerminateTestDB(); err != nil {
 		fmt.Fprintf(os.Stderr, "terminate test database: %v\n", err)
 		if code == 0 {
 			code = 1
@@ -26,7 +26,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestMigrateCreatesEveryTable(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 
 	tables := []string{
@@ -48,7 +48,7 @@ func TestMigrateCreatesEveryTable(t *testing.T) {
 }
 
 func TestAuditLogIsHypertable(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 
 	var n int
 	err := s.Pool().QueryRow(context.Background(),
@@ -63,7 +63,7 @@ func TestAuditLogIsHypertable(t *testing.T) {
 }
 
 func TestRoleCheckRejectsUnknownRole(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 
 	_, err := s.Pool().Exec(context.Background(),
 		`INSERT INTO users (id, username, password_hash, role, created_at)
@@ -78,7 +78,7 @@ func TestRoleCheckRejectsUnknownRole(t *testing.T) {
 }
 
 func TestMigrateIsIdempotent(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 
 	// NewTestDB has already migrated once; two more runs must be no-ops.

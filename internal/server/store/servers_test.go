@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/makhammatovb/fleetguard/internal/server/store"
+	"github.com/makhammatovb/fleetguard/internal/server/store/storetest"
 )
 
 func uniqueName(prefix string) string {
@@ -18,7 +19,7 @@ func uniqueName(prefix string) string {
 }
 
 func TestCreateServerRejectsDuplicateName(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	name := uniqueName("dup")
 
@@ -39,7 +40,7 @@ func TestCreateServerRejectsDuplicateName(t *testing.T) {
 }
 
 func TestConsumeEnrolTokenSucceedsOnce(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	srv, _ := s.CreateServer(ctx, uniqueName("once"), "")
@@ -61,7 +62,7 @@ func TestConsumeEnrolTokenSucceedsOnce(t *testing.T) {
 }
 
 func TestEnrolTokenIsStoredHashedOnly(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	srv, _ := s.CreateServer(ctx, uniqueName("hashed"), "")
 	tok, err := s.CreateEnrolToken(ctx, srv.ID, time.Hour, time.Now())
@@ -80,7 +81,7 @@ func TestEnrolTokenIsStoredHashedOnly(t *testing.T) {
 }
 
 func TestConsumeEnrolTokenRejectsExpired(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	srv, _ := s.CreateServer(ctx, uniqueName("expired"), "")
@@ -94,7 +95,7 @@ func TestConsumeEnrolTokenRejectsExpired(t *testing.T) {
 }
 
 func TestConsumeEnrolTokenIsAtomicUnderConcurrency(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	srv, _ := s.CreateServer(ctx, uniqueName("race"), "")
@@ -133,7 +134,7 @@ func TestConsumeEnrolTokenIsAtomicUnderConcurrency(t *testing.T) {
 }
 
 func TestListServersWithStatusComputesOnline(t *testing.T) {
-	s := store.NewTestDB(t)
+	s := storetest.NewTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
