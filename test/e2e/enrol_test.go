@@ -372,10 +372,20 @@ func TestEnrolAndHeartbeatEndToEnd(t *testing.T) {
 	}
 
 	// Once the install is done the token must be nowhere on the agent host's
-	// disk: it was handed to the agent by environment, not written anywhere.
-	if out := mustExec(t, h.agentName, "sh", "-c",
-		"grep -rIl -F -e '"+h.token+"' /etc /var /usr /root /tmp /home /opt 2>/dev/null || true"); strings.TrimSpace(out) != "" {
-		t.Errorf("the enrolment token was left on disk in: %s", out)
+	// disk: it was typed at a prompt and handed to the agent by environment. The
+	// search reports its own exit status (0 found, 1 nothing, 2+ failed), and a
+	// control search for something known to be on disk proves it can find things.
+	search := func(needle string) (string, string) {
+		out := mustExec(t, h.agentName, "sh", "-c",
+			"grep -rIl -F -e '"+needle+"' /etc /var /usr /root /tmp /home /opt 2>/dev/null; echo rc=$?")
+		i := strings.LastIndex(out, "rc=")
+		return strings.TrimSpace(out[:i]), strings.TrimSpace(out[i+3:])
+	}
+	if files, rc := search(agentHost); rc != "0" || !strings.Contains(files, "/etc/fleetguard/agent.yaml") {
+		t.Fatalf("control: searching the agent host's disk for %q found %q (rc=%s), want /etc/fleetguard/agent.yaml", agentHost, files, rc)
+	}
+	if files, rc := search(h.token); rc != "1" || files != "" {
+		t.Errorf("the enrolment token was left on disk (rc=%s): %s", rc, files)
 	}
 }
 
@@ -450,7 +460,8 @@ func TestClientSuppliedCertHeaderIsStrippedByCaddy(t *testing.T) {
 
 	// A real handshake certificate with forged headers: Caddy must replace both
 	// headers, so the request authenticates as the handshake says and the
-	// bogus proxy secret never reaches the backend (which would answer 401).
+	// bogus proxy secret never reaches the backend (which would answer 401). The
+	// X-Real-IP forgery is proven by effect in TestForgedRealIPDoesNotEvadeTheLoginRateLimit.
 	forged := map[string]string{api.AgentCertHeader: "AAAA", "X-Proxy-Auth": "bogus", "X-Real-IP": "203.0.113.9"}
 	if got := h.heartbeat(t, serverID, withCert, forged); got != http.StatusOK {
 		t.Errorf("heartbeat with a real certificate and forged headers = %d, want 200 (Caddy must overwrite them)", got)
@@ -513,9 +524,26 @@ func TestProxyCannotReadTheCAKey(t *testing.T) {
 	// Run as the proxy's uid and gid inside the server container, where the CA
 	// key actually lives: the pair is readable, the state directory and ca.key
 	// are not.
-	asProxy := func(args ...string) error {
-		_, err := h.compose(append([]string{"exec", "-T", "-u", "10002:10002", "server"}, args...)...)
-		return err
+	as := func(user string, args ...string) (string, error) {
+		out, err := h.compose(append([]string{"exec", "-T", "-u", user, "server"}, args...)...)
+		return string(out), err
+	}
+	// Positive control: the owner (the server's own uid) CAN read ca.key at this
+	// very path, so the failures below are about permissions and not a wrong
+	// filename, a restarting container or a failed exec.
+	if out, err := as("10001:10001", "cat", "/var/lib/fleetguard/ca.key"); err != nil || !strings.Contains(out, "PRIVATE KEY") {
+		t.Fatalf("control: the server's own uid cannot read ca.key at its path: %v %.80q", err, out)
+	}
+	// Each refusal must be a permission refusal, not just any error.
+	denied := func(what string, args ...string) {
+		t.Helper()
+		out, err := as("10002:10002", args...)
+		if err == nil || !strings.Contains(out, "Permission denied") {
+			t.Errorf("%s: want a permission-denied refusal, got err=%v out=%.200q", what, err, out)
+		}
+		if strings.Contains(out, "PRIVATE KEY") {
+			t.Errorf("%s leaked key material", what)
+		}
 	}
 	// In the proxy's own container, as the proxy, the pair is readable and is
 	// owned by the proxy's group, and no CA private key is anywhere in sight.
@@ -525,15 +553,9 @@ func TestProxyCannotReadTheCAKey(t *testing.T) {
 	if out, err := h.compose("exec", "-T", "caddy", "ls", "/proxy-certs"); err != nil || strings.Contains(string(out), "ca.key") {
 		t.Errorf("proxy directory contents %q (%v) must not include ca.key", out, err)
 	}
-	if err := asProxy("cat", "/var/lib/fleetguard/ca.key"); err == nil {
-		t.Error("the proxy's uid/gid can read ca.key")
-	}
-	if err := asProxy("ls", "/var/lib/fleetguard"); err == nil {
-		t.Error("the proxy's uid/gid can list the state directory")
-	}
-	if err := asProxy("cat", "/var/lib/fleetguard/proxy/../ca.key"); err == nil {
-		t.Error("the proxy's uid/gid can read ca.key by path traversal")
-	}
+	denied("the proxy's uid/gid reading ca.key", "cat", "/var/lib/fleetguard/ca.key")
+	denied("the proxy's uid/gid listing the state directory", "ls", "/var/lib/fleetguard")
+	denied("the proxy's uid/gid reading ca.key by path traversal", "cat", "/var/lib/fleetguard/proxy/../ca.key")
 
 	// And the proxy container never mounts the state volume, runs as 10002, and
 	// holds no fleet CA key.
@@ -542,6 +564,43 @@ func TestProxyCannotReadTheCAKey(t *testing.T) {
 	}
 	if _, err := h.compose("exec", "-T", "caddy", "test", "-e", "/var/lib/fleetguard"); err == nil {
 		t.Error("the proxy container mounts the state directory")
+	}
+}
+
+// The login limiter keys on X-Real-IP. If Caddy let a client's own value through,
+// an attacker could rotate it for a fresh bucket on every request and the
+// per-address limit would be void. Every attempt below uses a different
+// username (so the per-user limit cannot be what trips) and a different forged
+// address; the lockout must still arrive, because Caddy replaces the header with
+// the real peer address.
+func TestForgedRealIPDoesNotEvadeTheLoginRateLimit(t *testing.T) {
+	h := getStack(t)
+	h.enrolledAgent(t) // the admin session exists before this test uses up the shared address's attempts
+	limited := 0
+	for i := 0; i < 30; i++ {
+		b, _ := json.Marshal(map[string]string{"username": fmt.Sprintf("nobody-%d-%s", i, randHex(3)), "password": "wrong-password"})
+		req, err := http.NewRequest(http.MethodPost, "https://"+dashHost+"/api/login", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://"+dashHost)
+		req.Header.Set("X-Real-IP", fmt.Sprintf("198.51.100.%d", i+1))
+		resp, err := (&http.Client{Timeout: 20 * time.Second, Transport: h.transport(dashHost, h.caddyCA, nil)}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			limited++
+		case http.StatusUnauthorized:
+		default:
+			t.Fatalf("login attempt %d = %d, want 401 or 429", i, resp.StatusCode)
+		}
+	}
+	if limited == 0 {
+		t.Fatal("30 failed logins with rotating forged X-Real-IP values were never rate limited: the header reached the backend")
 	}
 }
 

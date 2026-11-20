@@ -56,7 +56,7 @@ token). `make down` stops the stack; volumes persist.
 
 | Variable | If it is wrong |
 |---|---|
-| `FG_BASE_URL` | **Must exactly equal the browser's `Origin`**: scheme, host and any non-default port. Otherwise the backend's Origin check refuses every state-changing request (login included) with 403. Also the origin the install command is built from. |
+| `FG_BASE_URL` | **Must exactly equal the browser's `Origin`**: scheme and host. The compose file publishes only 443, so the dashboard is served on the default port and the origin carries none. Otherwise the backend's Origin check refuses every state-changing request (login included) with 403. Also the origin the install command is built from. |
 | `FG_AGENT_URL` | Must be a different hostname from `FG_BASE_URL`. The server refuses to start if equal. Agents enrolled against the dashboard origin enrol fine and then fail every request. |
 | `FG_PROXY_SECRET` | Shared by Caddy and the backend. Mismatch: every request is 401. Without it the backend would be open to any local process. |
 | `FG_DB_PASSWORD` | Required, no default. Goes into a connection URL: letters and digits only. |
@@ -86,7 +86,11 @@ agent ───443──► Caddy  agent host: the fleet-CA certificate; proxies
   client-supplied values, which the end-to-end test proves.
 - **Loopback backend.** Caddy owns the container network namespace and the server
   joins it, so the backend is on Caddy's `127.0.0.1` and unreachable from
-  anywhere else. Caddy owns the namespace (not the server) so that restarting the
+  anywhere else. Because Caddy shares the backend's network namespace it can
+  also reach the database (`db:5432`) on the compose network. That is inherent to
+  the design and adds nothing a compromised Caddy lacks, since it can already
+  forge the two headers the backend trusts; it is noted so it is not discovered.
+  Caddy owns the namespace (not the server) so that restarting the
   server does not strand Caddy.
 - **Caddy cannot read the CA key.** The server (uid 10001) keeps `ca.key` (0600)
   in a 0700 state directory. It writes the proxy's files, `agent-server.crt`,
@@ -178,6 +182,16 @@ Be aware of what the tests above do not cover:
 - **Real ACME issuance.** The tests use Caddy's `local_certs`; a public
   certificate for the dashboard host has not been obtained.
 - **amd64.** Only linux/arm64 was run, although `make dist` builds both.
+- **sudo's tty handling on a real distribution.** The token prompt was driven
+  through `script(1)` as root in a container, not from a human terminal under a
+  real `sudo` (which may behave differently with `use_pty`, `requiretty` or
+  `env_reset`).
+- **Re-enrolment with an expired certificate through `verify_if_given`.** The
+  agent presents no certificate when it enrols or re-enrols, so Caddy should admit
+  it, and the code says so, but no test lets a certificate expire and then re-enrol.
+- **The automation paths** `--token=` and `FG_ENROL_TOKEN` of the installer.
+- **The browser copy-token flow.** It has component tests only, not a real
+  browser clipboard.
 - **Certificate reissue and reload.** The server certificate is reissued only
   when fewer than 60 days remain at start-up, and Caddy then needs a reload; that
   flow has not been run (only first issuance).
