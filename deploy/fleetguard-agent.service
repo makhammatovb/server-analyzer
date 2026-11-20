@@ -1,0 +1,25 @@
+[Unit]
+Description=FleetGuard agent
+Documentation=https://github.com/makhammatovb/fleetguard
+Wants=network-online.target
+After=network-online.target
+# Restart forever: never let a start limit turn a transient failure into a
+# permanent blind spot.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fleetguard-agent run --config=/etc/fleetguard/agent.yaml
+# Restart=always, not on-failure: the agent exits at once, with no retry, on a
+# transient local-state error (an EIO, a /var/lib that is not mounted yet).
+# Without this a mount race is a permanent monitoring blind spot.
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fleetguard
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

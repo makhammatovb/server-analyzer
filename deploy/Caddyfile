@@ -1,0 +1,107 @@
+# FleetGuard reverse proxy. Caddy is the only public listener (443); the backend
+# binds 127.0.0.1:8080 in the same network namespace and refuses to start on
+# anything else.
+#
+# Two hostnames, because TLS certificate selection is per hostname and the two
+# halves need certificates from different issuers:
+#
+#   FG_BASE_URL   the dashboard. A browser-trusted ACME certificate.
+#   FG_AGENT_URL  the agents. The certificate the server binary issued from the
+#                 fleet CA, because agents pin that CA and have no fallback to
+#                 system roots.
+{
+	# Empty in production. The end-to-end test sets it to "local_certs" so that
+	# Caddy's internal CA replaces ACME and no public DNS is needed.
+	{$FG_CADDY_GLOBAL:}
+}
+
+# Headers set on every proxied request, on both trees. header_up REPLACES any
+# value the client sent, which is what makes the agent-authentication model
+# sound: a client cannot forge X-Agent-Cert or X-Proxy-Auth.
+#   X-Agent-Cert  base64 DER of the client certificate from the TLS handshake
+#                 (empty when none was presented).
+#   X-Proxy-Auth  the shared secret the backend demands on /v1/* and /api/*.
+#   X-Real-IP     the peer address; the login rate limiter keys on it.
+(backend) {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up X-Agent-Cert {http.request.tls.client.certificate_der_base64}
+		header_up X-Proxy-Auth {env.FG_PROXY_SECRET}
+		header_up X-Real-IP {http.request.remote.host}
+	}
+}
+
+{$FG_BASE_URL} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000"
+	}
+
+	handle /api/* {
+		import backend
+	}
+
+	# The installer holds no secret; the token travels in the admin's command.
+	# {{env "FG_BASE_URL"}} inside it is filled in here, so the script knows
+	# which origin to fetch ca.crt and the agent from.
+	handle /install.sh {
+		root * /srv/site
+		templates {
+			mime text/plain application/x-sh text/x-sh
+		}
+		header Content-Type "text/plain; charset=utf-8"
+		file_server
+	}
+
+	handle /fleetguard-agent.service {
+		root * /srv/site
+		file_server
+	}
+
+	handle /downloads/* {
+		root * /srv/site
+		file_server
+	}
+
+	# The fleet CA certificate (the public copy the server writes), the agent's
+	# whole root of trust. Caddy has no access to ca.key at all: it mounts only
+	# the proxy directory.
+	handle /ca.crt {
+		root * /proxy-certs
+		file_server
+	}
+
+	handle {
+		root * /srv/dashboard
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+{$FG_AGENT_URL} {
+	# Issued by the fleet CA, written by the server binary at start. Caddy reads
+	# it at (re)load only: after a reissue run "caddy reload" (see the README).
+	tls /proxy-certs/agent-server.crt /proxy-certs/agent-server.key {
+		# verify_if_given, not require_and_verify: an agent enrolling for the
+		# first time has no certificate, and one whose certificate expired while
+		# its host was off must re-enrol without one. A certificate that IS
+		# presented is verified against the fleet CA; the backend then enforces
+		# per route (heartbeat demands a verified certificate; enrol and
+		# re-enrol are authenticated by token and enrolment secret).
+		client_auth {
+			mode verify_if_given
+			trust_pool file /proxy-certs/ca.crt
+		}
+	}
+
+	handle /v1/* {
+		import backend
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

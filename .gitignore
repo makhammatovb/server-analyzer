@@ -13,3 +13,9 @@ web/dist/
 
 # sdd scratch
 .superpowers/
+
+# macOS
+.DS_Store
+
+# generated installer downloads
+deploy/site/

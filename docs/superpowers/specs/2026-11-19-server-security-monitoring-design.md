@@ -413,7 +413,20 @@ need no code change. The starting set, aimed at the attack chain in §1:
 | Log files in `/var/log` truncated or shrinking | High |
 | Listening port newly exposed to `0.0.0.0` | Medium |
 | New kernel module loaded | Medium |
+| Repeated certificate rotations, or a boot ID flapping between values, on one server ID | High |
 | Pending security updates above a threshold, or unauthenticated database exposed | Low |
+
+**On the duplicate-identity rule.** It was not in this document's first draft; it came
+out of building Phase 0. Two hosts can end up sharing one `server_id` and enrolment
+secret — a cloned VM image, a restored snapshot, or a second agent process — and the
+consequence is worse than a noisy certificate: each host re-enrols, superseding the
+other's certificate, and whichever one loses the race is refused. Because the *winner*
+keeps heartbeating under the same server ID, `last_seen_at` keeps advancing and **the
+fleet list shows the server as healthy while a real machine sits unmonitored**. No
+silence alert fires, because the row never goes silent. The only visible trace is
+certificate rotations and boot-ID changes repeating far faster than the 60-day rotation
+interval should ever produce, which is why that pattern is a rule in its own right rather
+than a footnote to the others.
 
 ### Tier 2 — baselines and anomaly detection
 
@@ -464,10 +477,12 @@ handling at all.
 one-line command containing a short-lived enrollment token:
 
 ```
-curl -sSL https://central.example/install.sh | sudo bash -s -- --token=<ONE_TIME_TOKEN>
+curl -sSL https://central.example/install.sh | sudo bash -s -- --server-url=<AGENT_ORIGIN>
 ```
 
-The installer verifies the binary signature, installs the agent as a systemd unit,
+The installer prompts for the one-time token on the terminal rather than taking it on the
+command line, because a command line is readable by every local user while the install
+runs. It then verifies the binary signature, installs the agent as a systemd unit,
 enrols it, receives a per-host client certificate, and discards the token. The central
 app never learns an SSH credential.
 

@@ -4,7 +4,7 @@
 
 **Goal:** An admin can add a server in the dashboard, run one command on that server, and see the server appear and stay green in a fleet list — over mutual TLS, with no SSH credential ever stored.
 
-**Architecture:** One Go module with two binaries. The agent holds a client certificate issued by the central app's own certificate authority and makes only outbound HTTPS requests. Caddy is the single public listener: it terminates public TLS for the dashboard, requires and verifies a client certificate on the agent hostname, and forwards the certificate DER to the backend, which binds loopback only and re-verifies the chain itself. Postgres with TimescaleDB is the only datastore.
+**Architecture:** One Go module with two binaries. The agent holds a client certificate issued by the central app's own certificate authority and makes only outbound HTTPS requests. Caddy is the single public listener: it terminates public TLS for both hostnames and forwards the client certificate DER to the backend, which binds loopback only and re-verifies the chain itself. The agent hostname uses `verify_if_given` rather than `require_and_verify`, because an agent enrolling for the first time has no certificate yet and an agent whose certificate expired while offline must be able to re-enrol without one; the backend therefore enforces per route — heartbeat demands a verified certificate, enrolment and re-enrolment are authenticated by a single-use token and the enrolment secret respectively. Postgres with TimescaleDB is the only datastore.
 
 **Tech Stack:** Go 1.25 (agent + backend, `net/http` with `ServeMux` method patterns, `pgx/v5`, `goose` migrations, `testcontainers-go`), PostgreSQL + TimescaleDB, React 18 + TypeScript + Vite + TanStack Query + Tailwind, Caddy, Docker Compose.
 
@@ -23,10 +23,15 @@ Every task's requirements implicitly include these. Values are copied from the s
 - **Agent resource budget: under 1% of one CPU core and under 50 MB RSS in steady state.**
 - **Host certificates live 90 days and rotate at 60.** An agent whose certificate expired while offline re-enrols automatically using the enrolment secret and does not require admin action.
 - **The backend binds `127.0.0.1` only.** Caddy is the only process with a public listener.
+- **Both `/v1/*` and `/api/*` require the proxy secret**, and the proxy supplies the client address. The reverse proxy sets `X-Proxy-Auth: $FG_PROXY_SECRET` and `X-Real-IP` (from the connection's remote host, which a client cannot influence) on every proxied request; the backend requires the secret on both trees and takes the client address from that header, falling back to `RemoteAddr` only when no valid secret is present. Two reasons. First, without a trusted client address every browser behind the proxy shares one rate-limit bucket, so ten failed logins would lock out the whole dashboard — and trusting a client-supplied `X-Forwarded-For` instead would let an attacker rotate the header to escape the limit entirely. Second, the admin API is the dashboard's entire perimeter: requiring the secret there too means an SSRF in anything else running on the central host cannot reach it, which loopback binding alone does not prevent.
+- **Password hashing is capacity-limited.** Each login verification costs 64 MiB of argon2 memory, so concurrent verifications are capped by a semaphore and requests beyond the cap are refused rather than queued without bound. Rate limits alone do not bound this: a distributed set of sources, each inside its own per-IP limit, could otherwise exhaust the central host's memory with unauthenticated requests.
+- **Two hostnames are mandatory, not a deployment preference.** TLS certificate selection is per hostname, and the two halves of this system need certificates from different authorities: the dashboard must present a browser-trusted ACME certificate, while the agent endpoint must present one issued by the fleet CA, because the agent pins that CA and has no system-roots fallback. One hostname cannot do both. So `FG_BASE_URL` is the dashboard origin — the UI, `/api/*`, `/install.sh` and `/ca.crt` — and `FG_AGENT_URL` is the agent origin, serving `/v1/*`. The install command must pass `--server-url=$FG_AGENT_URL`; pointing an agent at the dashboard origin produces an agent that cannot verify the server and fails every request after enrolment. `FG_AGENT_URL` is **required** and the binary refuses to start without it: a default derived from the base URL would silently produce exactly that broken agent across a whole fleet.
+- **`/v1/*` requires the proxy secret.** Proof that an agent holds its private key happens in Caddy's TLS handshake, not in the backend — the backend only sees certificate bytes in a header, which prove nothing on their own. So the backend requires a shared secret header, `X-Proxy-Auth: $FG_PROXY_SECRET`, on every `/v1/*` request, set by Caddy and known only to Caddy and the backend. Loopback binding alone is **not** sufficient: any other local process, or an SSRF in the dashboard, could otherwise post a borrowed certificate to `127.0.0.1:8080` and be authenticated as that agent.
 - **Enrolment tokens are single-use with a 1-hour TTL.**
 - **One Go module**, `github.com/makhammatovb/fleetguard`, with shared wire types in `pkg/api` used by both binaries.
 - **Secrets at rest are hashed, never stored in plaintext:** enrolment tokens, enrolment secrets, session tokens, passwords.
-- Toolchain present on the dev machine: Go 1.25.4, Node 26.4.0, Docker 29.1.3.
+- **Go toolchain floor is 1.26.0**, set in `go.mod`. This was 1.25.4 in the plan's first draft, which described the dev machine rather than a product requirement; two dependencies this plan mandates — `github.com/pressly/goose/v3` v3.30.1 and `github.com/testcontainers/testcontainers-go` v0.45.0 — both declare `go 1.26.0`, so 1.25.4 is only reachable by downgrading them. Contributors on 1.25.4 still build, because `GOTOOLCHAIN=auto` fetches the required toolchain; a CI image pinned to `GOTOOLCHAIN=local` with Go 1.25 will not, so Task 12's README must state the 1.26.0 floor and why.
+- Other toolchain present on the dev machine: Node 26.4.0, Docker 29.1.3.
 
 ## Review Focus
 
@@ -255,9 +260,13 @@ git add -A && git commit -m "feat(store): server, enrolment token, agent and aud
 
 **Interfaces:**
 - Consumes: `api.*` (Task 1), `*store.Store` (Task 4), `*ca.CA` (Task 3).
-- Produces: `httpapi.NewAgentRouter(st *store.Store, authority *ca.CA, lg *slog.Logger) http.Handler` serving `POST /v1/enrol` and `POST /v1/re-enrol`. Request bodies are read through `http.MaxBytesReader` with `api.MaxBodyBytes`.
+- Produces: `httpapi.NewAgentRouter(st *store.Store, authority *ca.CA, proxySecret string, lg *slog.Logger) http.Handler` serving `POST /v1/enrol` and `POST /v1/re-enrol`, plus `httpapi.RequireProxySecret(secret string)` middleware wrapping **every** `/v1/*` route. Request bodies are read through `http.MaxBytesReader` with `api.MaxBodyBytes`.
 
-Behaviour: `/v1/enrol` consumes the token, signs the CSR for the token's server ID with a 90-day TTL, generates a 32-byte enrolment secret, records the enrolment, audits `agent.enrolled`, and returns `api.EnrolResponse`. `/v1/re-enrol` verifies the enrolment secret for the claimed server ID, signs a fresh certificate, and audits `agent.re-enrolled`; it requires no token and works whether or not the previous certificate has expired. Both refuse a server whose `decommissioned_at` is set.
+**Neither of these two routes requires a client certificate**, and that is not an oversight: an agent enrolling for the first time has none, and an agent whose certificate expired while its server was switched off must be able to re-enrol without one. They are authenticated by the single-use token and by the enrolment secret. What guards them against a local process bypassing Caddy is `RequireProxySecret`, which is why it wraps the whole `/v1/*` tree and not just the heartbeat route — build it here, in the task that creates the router, rather than in Task 7.
+
+Behaviour: `/v1/enrol` consumes the token, signs the CSR for the token's server ID with a 90-day TTL, generates a 32-byte enrolment secret, records the enrolment, audits `agent.enrolled`, and returns `api.EnrolResponse`. The stored hash is built with `store.HashHighEntropySecret`, so it matches what `VerifyEnrolKey` compares against. `/v1/re-enrol` verifies the enrolment secret for the claimed server ID, signs a fresh certificate, and audits `agent.reenrolled`; it requires no token and works whether or not the previous certificate has expired.
+
+A decommissioned server is refused by the **store** (Ruling 9), which collapses it into `ErrTokenInvalid` for token consumption and `ErrEnrolKeyInvalid` for the secret. The handler therefore answers **401, not 403**: distinguishing the decommissioned case would tell a caller holding a token that it names a real server which merely got retired, which is exactly the fact the indistinguishable error exists to hide. The audit entry records the real reason; the response does not.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -269,7 +278,9 @@ func TestEnrolRejectsReplayedToken(t *testing.T)             // second POST with
 func TestEnrolReplayIsAudited(t *testing.T)                  // audit_log contains action 'agent.enrol_rejected'
 func TestEnrolRejectsExpiredToken(t *testing.T)              // -> 401
 func TestEnrolRejectsOversizedBody(t *testing.T)             // 1 MiB body -> 413
-func TestEnrolRejectsDecommissionedServer(t *testing.T)      // -> 403
+func TestEnrolRejectsDecommissionedServer(t *testing.T)      // -> 401, NOT 403 (see below)
+func TestEnrolRejectsMissingProxySecret(t *testing.T)        // valid token, no X-Proxy-Auth -> 401
+func TestReEnrolRejectsMissingProxySecret(t *testing.T)      // valid secret, no X-Proxy-Auth -> 401
 func TestReEnrolWithValidSecretIssuesNewCert(t *testing.T)   // new fingerprint differs from the first
 func TestReEnrolRejectsWrongSecret(t *testing.T)             // -> 401
 ```
@@ -305,6 +316,22 @@ git add -A && git commit -m "feat(api): single-use token enrolment and secret-ba
 **Interfaces:**
 - Consumes: `api.*` (Task 1); the enrolment endpoints (Task 5) are exercised through a test server built from `httpapi.NewAgentRouter`.
 - Produces: `agent.Config{ServerURL, StateDir string, PollInterval time.Duration}` with `agent.LoadConfig(path string) (Config, error)`; `agent.Identity{ServerID string, Cert tls.Certificate, CAPool *x509.CertPool, NotAfter time.Time}`; `agent.Enrol(ctx, cfg Config, token, hostname, version string) (Identity, error)`; `agent.LoadIdentity(cfg Config) (Identity, error)` returning `agent.ErrNoIdentity` when absent; `agent.ReEnrol(ctx, cfg Config) (Identity, error)`; `(Identity).NeedsRotation(now time.Time) bool`; `agent.NewClient(id Identity, cfg Config) *agent.Client` and `(*Client).SendHeartbeat(ctx, hb api.Heartbeat) (api.HeartbeatResponse, error)`.
+
+**Trust anchor: the agent pins the fleet CA and never uses system roots.** The agent
+verifies the server with `ca.crt` alone, on every call including the very first enrolment.
+This requires the **agent hostname's server certificate to be issued by the fleet CA**, not
+by ACME — see Task 12. The dashboard hostname keeps a public ACME certificate, because
+browsers need one; the agent does not. Pinning this way means no public certificate
+authority is in the agent's trust path at all, so no mis-issued or compromised public CA
+can intercept agent traffic, read a fleet's telemetry, or feed an agent forged responses.
+
+The bootstrap is the install command: `install.sh` fetches `ca.crt` from the dashboard
+hostname over publicly trusted TLS and writes it into the state directory *before* calling
+`enrol`, so the agent has its pin from the first request. The root of trust is therefore the
+same TLS connection that already delivers the installer and the one-time token — nothing
+weaker is introduced. There must be **no system-roots fallback**: a config field that
+silently falls back to system roots when `ca.crt` is missing would turn a missing-file bug
+into an undetectable downgrade, so a missing or unparseable `ca.crt` is a hard error.
 
 State directory layout, all files written `0600` and owned by root: `agent.crt`, `agent.key`, `ca.crt`, `enrol.key`, `server_id`. Config file `/etc/fleetguard/agent.yaml` holds only `server_url` and `poll_interval`. `NeedsRotation` is true when fewer than 30 days remain, giving the 90-day/60-day rule from the spec.
 
@@ -355,7 +382,22 @@ git add -A && git commit -m "feat(agent): enrolment, on-disk identity and mutual
 - Consumes: `*ca.CA` (Task 3), `(*Store).TouchHeartbeat` and `AppendAudit` (Task 4).
 - Produces: `POST /v1/heartbeat` on the agent router; middleware `httpapi.AgentAuth(authority *ca.CA)` which reads the base64 DER from the `api.AgentCertHeader` header, verifies it against the CA, and puts the server ID in the request context, retrievable with `httpapi.ServerIDFrom(ctx) (string, bool)`; `httpapi.NewRateLimiter(perMinute int) *RateLimiter` keyed by server ID.
 
-The certificate arrives in a header because Caddy terminates TLS (Task 12). The backend re-verifies the chain itself rather than trusting Caddy's verdict, and binds loopback only, so the header cannot be set by anyone else. A heartbeat whose body `ServerID` differs from the certificate's server ID is rejected with 403 and audited.
+The certificate arrives in a header because Caddy terminates TLS (Task 12). The backend re-verifies the chain itself rather than trusting Caddy's verdict.
+
+**What the header does and does not prove.** `ca.Verify` is a chain-and-subject check over bytes; it proves the certificate was issued by our CA, *not* that the caller holds the matching private key. Possession is proven only by the TLS handshake Caddy performs. Two things therefore bind, and the middleware is not correct without both:
+
+1. The backend binds loopback only (Task 10 enforces this in code).
+2. `AgentAuth` rejects any `/v1/*` request that does not carry `X-Proxy-Auth` equal to `FG_PROXY_SECRET`, compared with `crypto/subtle.ConstantTimeCompare`. Caddy sets that header; nothing else knows it. Without this, any local process could replay a certificate it obtained anywhere — a public one scraped from a handshake would do — and be authenticated as that agent.
+
+**`AgentAuth` is the complete gate, and nothing partial carries that name.** It takes the authority, a fingerprint lookup (`func(ctx context.Context, serverID string) (string, error)`, satisfied by the store but not typed to it), the rate limiter and `now`, and internally performs, in this order: verify the certificate chain; rate-limit by the server ID the chain established; compare `ca.Fingerprint(certDER)` against the stored `agents.cert_fingerprint`, rejecting a mismatch with 403 plus an audit entry.
+
+That order is load-bearing and the two reasons pull against each other, so it is fixed here. The pin check needs a database round trip and writes an audit row on rejection, so it must sit **behind** the limiter — otherwise anyone holding any CA-issued certificate that is no longer current, which is exactly the certificate this check exists to stop, can drive unbounded `audit_log` writes and one query each at full request rate. But the limiter keys on the server ID, which only the chain check establishes, so it must sit **in front of** the pin. Hence chain, then limit, then pin — one middleware owning all three rather than a chain-only `AgentAuth` with the pin bolted on outside it, because an exported middleware named for authentication that proves only issuance is a trap: the next route to reach for it gets a gate a superseded certificate walks through, and an unexported pin cannot be composed by any caller to close it. Chaining to the CA is not sufficient: `RecordCertRotation` overwrites the fingerprint on re-enrolment but there is no CRL, so without this check a superseded certificate keeps authenticating for the remainder of its own 90 days. Pinning the fingerprint is what turns rotation into real retirement and caps a stolen key's useful life at the 60-day rotation interval rather than 90 days from issue. Add a test: rotate a certificate via re-enrolment, then heartbeat with the previous one and expect 403.
+
+`AgentAuth` must also reject a server whose `decommissioned_at` or `agents.revoked_at` is set, which is what makes decommissioning in the UI (Task 10) an actual revocation: there is no CRL, and an issued certificate stays cryptographically valid for its full 90 days, so the database is the only revocation checkpoint.
+
+**The store enforces this, not the handler.** `TouchHeartbeat` returns `store.ErrServerInactive` when the server is decommissioned or the agent revoked; `ConsumeEnrolToken` returns `ErrTokenInvalid` for a decommissioned server's token; `VerifyEnrolKey` returns `ErrEnrolKeyInvalid` for a revoked agent. The handler's job is to map `ErrServerInactive` to 403 and audit it — it must not be the only thing standing between a revoked agent and a fresh certificate, because a handler that forgets the check fails open.
+
+A heartbeat whose body `ServerID` differs from the certificate's server ID is rejected with 403 and audited.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -371,6 +413,11 @@ func TestHeartbeatFlagsChangedBootID(t *testing.T)                     // second
 func TestHeartbeatRejectsOversizedBody(t *testing.T)                   // 1 MiB -> 413
 func TestHeartbeatRateLimitPerServer(t *testing.T)                     // 61st request within a minute -> 429; a second server is unaffected
 func TestHeartbeatResponseCarriesPollInterval(t *testing.T)            // PollIntervalSec == 30
+func TestAgentRouteRejectsMissingProxySecret(t *testing.T)             // valid cert header, no X-Proxy-Auth -> 401
+func TestAgentRouteRejectsWrongProxySecret(t *testing.T)               // valid cert header, wrong secret -> 401
+func TestHeartbeatRejectedForDecommissionedServer(t *testing.T)        // valid cert, decommissioned_at set -> 403, audited
+func TestHeartbeatRejectedForRevokedAgent(t *testing.T)                // valid cert, agents.revoked_at set -> 403, audited
+func TestHeartbeatRejectsSupersededCertificate(t *testing.T)           // re-enrol, then heartbeat with the previous cert -> 403, audited
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -500,10 +547,19 @@ git add -A && git commit -m "feat(auth): username/password login with admin acti
 - Consumes: Tasks 3, 4, 9.
 - Produces: on the admin router — `POST /api/servers` (admin; body `{name, note}`; returns `{server, install_command, token_expires_at}`), `GET /api/servers` (any user; the fleet list), `GET /api/servers/{id}`, `POST /api/servers/{id}/enrol-token` (admin; issues a fresh token for re-installing), `POST /api/servers/{id}/decommission` (admin; sets `decommissioned_at` and revokes the agent). Plus `cmd/server/main.go`, the `fleetguard-server` binary.
 
-`install_command` is rendered from `baseURL` and the one-time token as:
-`curl -sSL <baseURL>/install.sh | sudo bash -s -- --token=<token> --server-url=<baseURL>`
+`install_command` is rendered from both origins and the one-time token as:
+`curl -sSL <baseURL>/install.sh | sudo bash -s -- --server-url=<agentURL>`
 
-The binary reads `FG_DSN`, `FG_LISTEN` (default `127.0.0.1:8080`), `FG_BASE_URL`, `FG_STATE_DIR` (default `/var/lib/fleetguard`), runs migrations, calls `ca.LoadOrCreate(FG_STATE_DIR)`, optionally bootstraps the first admin, and serves the agent and admin routers on one listener with `/v1/` and `/api/` prefixes. It must refuse to start if `FG_LISTEN` resolves to a non-loopback address unless `FG_ALLOW_PUBLIC_LISTEN=1` is set, so the loopback constraint is enforced in code rather than in documentation.
+**The token is deliberately not in this command.** `--token` on a command line is readable
+by every local user through `ps` for as long as the install runs, which is long enough for
+one of them to enrol their own agent as that server. So the API returns the token as a
+separate field, the dashboard shows it in its own block with a copy button, and the
+installer prompts for it on `/dev/tty`. `FG_ENROL_TOKEN` and `--token` remain for
+non-interactive automation, where an operator accepts that trade knowingly.
+
+The installer is fetched from the dashboard origin over publicly trusted TLS — that connection is the agent's root of trust, and it is also where `ca.crt` comes from — while `--server-url` is the **agent** origin, whose certificate the fleet CA issued and the agent pins. Mixing these up is the single easiest way to break every enrolment at once, which is why the binary requires both values explicitly.
+
+The binary reads `FG_DSN`, `FG_LISTEN` (default `127.0.0.1:8080`), `FG_BASE_URL` (dashboard origin), `FG_AGENT_URL` (agent origin — required), `FG_STATE_DIR` (default `/var/lib/fleetguard`), `FG_PROXY_SECRET` (required — the binary refuses to start without it), runs migrations, calls `ca.LoadOrCreate(FG_STATE_DIR)`, optionally bootstraps the first admin, and serves the agent and admin routers on one listener with `/v1/` and `/api/` prefixes. It must refuse to start if `FG_LISTEN` resolves to a non-loopback address unless `FG_ALLOW_PUBLIC_LISTEN=1` is set, so the loopback constraint is enforced in code rather than in documentation.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -608,7 +664,7 @@ git add -A && git commit -m "feat(web): login, registration, pending approval, f
 - Consumes: both binaries and `web/dist`.
 - Produces: `make up` brings the stack up; a documented install command enrols a real agent.
 
-**Caddy configuration.** Two site blocks on 443. The dashboard hostname serves `web/dist` and reverse-proxies `/api/*` to `127.0.0.1:8080`, with a public ACME certificate. The agent hostname requires a client certificate — `client_auth { mode require_and_verify; trust_pool file /var/lib/fleetguard/ca.crt }` — reverse-proxies `/v1/*` to the same backend, and sets `header_up X-Agent-Cert {http.request.tls.client.certificate_der_base64}`. `/install.sh` is served unauthenticated from the dashboard hostname, since it contains no secret; the token travels in the admin's command line.
+**Caddy configuration.** Two site blocks on 443, with **different certificate sources**, which is deliberate. The dashboard hostname serves `web/dist` and reverse-proxies `/api/*` to `127.0.0.1:8080` with a public ACME certificate, because browsers need one. The agent hostname serves a certificate **issued by the fleet CA** (`tls <cert> <key>`), because the agent pins that CA and must never fall back to system roots (Task 6). This needs one addition to the CA package: `(*CA).IssueServerCert(dnsName string, ttl time.Duration, now time.Time) (certPEM, keyPEM []byte, err error)`, setting `ExtKeyUsageServerAuth` and the DNS SAN — the existing `Sign` issues client certificates only. The server binary writes `agent-server.crt`/`.key` into the state directory at startup, reissuing when fewer than 60 days remain, with a 1-year TTL so Phase 0 needs no renewal daemon; Caddy loads them from there and picks up a reissue on restart. Record that restart requirement in the README. The agent hostname uses `client_auth { mode verify_if_given; trust_pool file /var/lib/fleetguard/ca.crt }` — **not** `require_and_verify`, because an agent enrolling for the first time has no certificate and an agent whose certificate expired while offline must re-enrol without one; `verify_if_given` verifies the chain when a certificate is presented and admits the request when none is, and the backend then enforces per route — reverse-proxies `/v1/*` to the same backend, and sets both `header_up X-Agent-Cert {http.request.tls.client.certificate_der_base64}` and `header_up X-Proxy-Auth {env.FG_PROXY_SECRET}`. Because `header_up` replaces rather than appends, a client that supplies its own `X-Agent-Cert` or `X-Proxy-Auth` cannot have it reach the backend — the e2e test must assert that, since the whole agent-authentication model rests on it. `/install.sh` **and `/ca.crt`** are served unauthenticated from the dashboard hostname by Caddy as static files — the backend mounts only `/v1/` and `/api/`, so if Caddy does not serve these two paths nothing else will, and every install command 404s. Neither contains a secret: the token travels in the admin's command line, and the CA certificate is public by design. Serving `ca.crt` over the dashboard's publicly trusted TLS is what bootstraps the agent's pin, so it must be the fleet CA's current certificate, read from the state directory rather than copied.
 
 **Deviation from spec §17.4, stated deliberately.** The spec requires the installer to
 verify a release signature against a pinned public key. Phase 0 has no release pipeline
@@ -619,7 +675,7 @@ to the central app, not a signature. Signature verification with a pinned key is
 **required** part of Phase 5's auto-update work and is recorded in the README as an
 outstanding item, not as done.
 
-`install.sh` must: refuse to run as non-root; detect `uname -m` and map to the right binary; download the agent over HTTPS; verify its SHA-256 against a published checksum file; install to `/usr/local/bin/fleetguard-agent`; create `/etc/fleetguard/agent.yaml` and `/var/lib/fleetguard` with mode `0700`; run `fleetguard-agent enrol --token=...`; install and enable the systemd unit; print the result. It must be idempotent — a second run re-enrols rather than failing — and must leave no copy of the token on disk.
+`install.sh` must: refuse to run as non-root; **fetch `ca.crt` from the dashboard hostname over publicly trusted TLS and install it into the state directory before enrolling**, since that connection is the agent's entire root of trust; detect `uname -m` and map to the right binary; download the agent over HTTPS; verify its SHA-256 against a published checksum file; install to `/usr/local/bin/fleetguard-agent`; create `/etc/fleetguard/agent.yaml` and `/var/lib/fleetguard` with mode `0700`; run `fleetguard-agent enrol --token=...`; install and enable the systemd unit; print the result. It must be idempotent — a second run re-enrols rather than failing — and must leave no copy of the token on disk.
 
 - [ ] **Step 1: Write the failing end-to-end test**
 
@@ -628,6 +684,9 @@ func TestEnrolAndHeartbeatEndToEnd(t *testing.T)
 // Brings up compose (testcontainers compose module), bootstraps an admin, logs in,
 // POSTs /api/servers, runs the agent container with the returned install command,
 // then polls GET /api/servers until the server reports online, with a 90s deadline.
+func TestClientSuppliedCertHeaderIsStrippedByCaddy(t *testing.T)
+// POST /v1/heartbeat through Caddy with a forged X-Agent-Cert for another server's ID
+// and no client certificate: must not authenticate as that server.
 func TestAgentSurvivesBackendRestart(t *testing.T)
 // Restarts the server container; the agent reports online again within two poll intervals.
 ```

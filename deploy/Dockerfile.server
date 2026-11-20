@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/fleetguard-server ./cmd/server
+
+FROM alpine:3.21
+# The server (uid 10001) owns the state directory, mode 0700, and ca.key in it
+# (0600). The reverse proxy runs as a DIFFERENT user (uid 10002, Dockerfile.caddy)
+# and is given group access to one subdirectory only, /var/lib/fleetguard/proxy,
+# where the server writes the agent certificate pair. That directory is setgid
+# 2750 with group 10002, so files the server creates there are readable by the
+# proxy's group (the server sets 0640 on the key) and by no one else. It is its
+# own volume, so the proxy container never mounts the state directory.
+RUN addgroup -g 10001 fleetguard && adduser -D -u 10001 -G fleetguard fleetguard \
+ && addgroup -g 10002 fgproxy \
+ && install -d -m 0700 -o 10001 -g 10001 /var/lib/fleetguard \
+ && install -d -m 2750 -o 10001 -g 10002 /var/lib/fleetguard/proxy
+COPY --from=build /out/fleetguard-server /usr/local/bin/fleetguard-server
+USER 10001:10001
+ENV FG_STATE_DIR=/var/lib/fleetguard
+ENTRYPOINT ["/usr/local/bin/fleetguard-server"]
