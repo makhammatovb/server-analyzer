@@ -19,11 +19,11 @@ export default function AddServer() {
   }
 
   if (create.data) {
-    const { install_command, token_expires_at, server } = create.data
+    const { install_command, token, token_expires_at, server } = create.data
     return (
       <section>
         <h1 className="mb-2 text-xl font-semibold">Install the agent on {server.name}</h1>
-        <InstallCommand command={install_command} expiresAt={token_expires_at} />
+        <InstallCommand command={install_command} token={token} expiresAt={token_expires_at} />
         <p className="mt-4 text-sm"><Link className="underline" to="/fleet">Back to servers</Link> — the server turns green once the agent connects.</p>
       </section>
     )

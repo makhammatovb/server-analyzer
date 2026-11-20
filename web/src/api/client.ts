@@ -73,5 +73,6 @@ export interface FleetRow extends Server {
 export interface CreatedServer {
   server: Server
   install_command: string
+  token: string
   token_expires_at: string
 }

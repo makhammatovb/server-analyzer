@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # FleetGuard agent installer. Served by the dashboard origin and run as root:
 #
-#   curl -sSL https://<dashboard>/install.sh | sudo bash -s -- --token=<t> --server-url=<agent origin>
+#   curl -sSL https://<dashboard>/install.sh | sudo bash -s -- --server-url=<agent origin>
+#
+# The enrolment token is read from the terminal (/dev/tty) when the script asks
+# for it: paste it at the prompt. That keeps it out of argv (visible to every
+# local user in ps), the environment, shell history and disk. Non-interactive
+# automation may instead set FG_ENROL_TOKEN in the installer's environment (note
+# that sudo's env_reset often strips it: use `sudo --preserve-env=FG_ENROL_TOKEN`)
+# or pass --token=, accepting that argv is then readable by local users.
 #
 # The dashboard origin below is filled in by the reverse proxy when it serves
 # this file. That TLS connection (publicly trusted) is this installer's only
@@ -30,7 +37,8 @@ case $BASE_URL in
   *) die "this script was not served by a FleetGuard dashboard (no origin was filled in); fetch it from https://<your-dashboard>/install.sh" ;;
 esac
 
-TOKEN=""
+TOKEN=${FG_ENROL_TOKEN:-}
+unset FG_ENROL_TOKEN
 SERVER_URL=""
 for arg in "$@"; do
   case $arg in
@@ -39,8 +47,16 @@ for arg in "$@"; do
     *) die "unknown argument: $arg" ;;
   esac
 done
-[ -n "$TOKEN" ] || die "--token is required"
 [ -n "$SERVER_URL" ] || die "--server-url is required (the agent origin, not the dashboard)"
+if [ -z "$TOKEN" ]; then
+  # The script itself arrives on stdin, so the terminal is read directly.
+  { : </dev/tty; } 2>/dev/null || die "no terminal to ask for the enrolment token on: run the command from an interactive shell, or set FG_ENROL_TOKEN for automation"
+  printf 'Paste the enrolment token and press Enter: ' >/dev/tty
+  IFS= read -r -s TOKEN </dev/tty || die "could not read the enrolment token"
+  printf '\n' >/dev/tty
+  TOKEN=${TOKEN//[[:space:]]/}
+fi
+[ -n "$TOKEN" ] || die "no enrolment token given"
 # Both values end up in a root-run script and a config file: accept only what
 # an origin and a base64url token can look like.
 [[ $TOKEN =~ ^[A-Za-z0-9_-]+$ ]] || die "malformed token"

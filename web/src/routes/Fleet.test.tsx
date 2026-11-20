@@ -136,19 +136,21 @@ describe('Fleet', () => {
   })
 
   test('an admin can reissue the install command, shown once with its expiry', async () => {
-    const cmd = "curl -fsSL 'https://fg.example.com/install.sh' | sudo FG_TOKEN='n&<e>w$9' sh"
+    const cmd = 'curl -sSL https://fg.example.com/install.sh | sudo bash -s -- --server-url=https://agents.example.com'
+    const tok = 'n&<e>w$9'
     const calls: string[] = []
     serve([row({ id: 's3', name: 'lost-cmd', online: false })])
     server.use(
       http.post('*/api/servers/:id/enrol-token', ({ params }) => {
         calls.push(String(params.id))
-        return HttpResponse.json({ install_command: cmd, token_expires_at: '2026-11-19T13:00:00Z' })
+        return HttpResponse.json({ install_command: cmd, token: tok, token_expires_at: '2026-11-19T13:00:00Z' })
       }),
     )
     renderWithProviders(<Fleet />)
     await userEvent.setup().click(await screen.findByRole('button', { name: /reissue install command/i }))
 
     expect((await screen.findByTestId('install-command')).textContent).toBe(cmd)
+    expect(screen.getByTestId('enrol-token').textContent).toBe(tok)
     expect(calls).toEqual(['s3'])
     expect(screen.getByText(/shown only once/i)).toBeInTheDocument()
     expect(screen.getByTestId('token-expiry')).toHaveTextContent(/2026/)

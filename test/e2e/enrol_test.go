@@ -282,7 +282,7 @@ func (h *harness) login(t *testing.T) {
 }
 
 // addServer registers a server and returns its ID and install command.
-func (h *harness) addServer(t *testing.T, name string) (id, installCmd string) {
+func (h *harness) addServer(t *testing.T, name string) (id, installCmd, token string) {
 	t.Helper()
 	resp, body := h.dashDo(t, http.MethodPost, "/api/servers", map[string]string{"name": name})
 	if resp.StatusCode != http.StatusCreated {
@@ -291,11 +291,12 @@ func (h *harness) addServer(t *testing.T, name string) (id, installCmd string) {
 	var out struct {
 		Server         struct{ ID string } `json:"server"`
 		InstallCommand string              `json:"install_command"`
+		Token          string              `json:"token"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil || out.Server.ID == "" || out.InstallCommand == "" {
 		t.Fatalf("decode create server: %v: %s", err, body)
 	}
-	return out.Server.ID, out.InstallCommand
+	return out.Server.ID, out.InstallCommand, out.Token
 }
 
 func (h *harness) waitOnline(t *testing.T, id string, within time.Duration) {
@@ -319,15 +320,15 @@ func (h *harness) enrolledAgent(t *testing.T) (serverID string) {
 	t.Helper()
 	h.agentOnce.Do(func() {
 		h.login(t)
-		id, cmd := h.addServer(t, "e2e-agent")
+		id, cmd, token := h.addServer(t, "e2e-agent")
 		h.serverID = id
-		h.token = tokenOf(cmd)
-		if h.token == "" {
-			t.Fatalf("install command carries no --token: %q", cmd)
+		h.token = token
+		if token == "" || strings.Contains(cmd, token) || strings.Contains(cmd, "--token") {
+			t.Fatalf("the token must be returned beside the install command, not in it: %q", cmd)
 		}
 		h.agentName = h.project + "-agent"
 		out, err := h.compose("--profile", "agent", "run", "-d", "--no-deps", "--name", h.agentName,
-			"-e", "FG_INSTALL_COMMAND="+cmd, "agent")
+			"-e", "FG_INSTALL_COMMAND="+cmd, "-e", "FG_TEST_TOKEN="+token, "agent")
 		if err != nil {
 			h.agentErr = fmt.Errorf("start agent container: %v\n%s", err, out)
 		}
@@ -503,6 +504,47 @@ func rogueCert(t *testing.T) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
+// The reverse proxy is the internet-facing process. Even if it is compromised it
+// must not be able to read the fleet CA private key, which signs every agent
+// identity and cannot be revoked.
+func TestProxyCannotReadTheCAKey(t *testing.T) {
+	h := getStack(t)
+
+	// Run as the proxy's uid and gid inside the server container, where the CA
+	// key actually lives: the pair is readable, the state directory and ca.key
+	// are not.
+	asProxy := func(args ...string) error {
+		_, err := h.compose(append([]string{"exec", "-T", "-u", "10002:10002", "server"}, args...)...)
+		return err
+	}
+	// In the proxy's own container, as the proxy, the pair is readable and is
+	// owned by the proxy's group, and no CA private key is anywhere in sight.
+	if out, err := h.compose("exec", "-T", "caddy", "sh", "-c", "cat /proxy-certs/agent-server.key >/dev/null && stat -c %g /proxy-certs/agent-server.key"); err != nil || strings.TrimSpace(string(out)) != "10002" {
+		t.Errorf("the proxy cannot read its certificate key, or it is not in the proxy's group: %q %v", out, err)
+	}
+	if out, err := h.compose("exec", "-T", "caddy", "ls", "/proxy-certs"); err != nil || strings.Contains(string(out), "ca.key") {
+		t.Errorf("proxy directory contents %q (%v) must not include ca.key", out, err)
+	}
+	if err := asProxy("cat", "/var/lib/fleetguard/ca.key"); err == nil {
+		t.Error("the proxy's uid/gid can read ca.key")
+	}
+	if err := asProxy("ls", "/var/lib/fleetguard"); err == nil {
+		t.Error("the proxy's uid/gid can list the state directory")
+	}
+	if err := asProxy("cat", "/var/lib/fleetguard/proxy/../ca.key"); err == nil {
+		t.Error("the proxy's uid/gid can read ca.key by path traversal")
+	}
+
+	// And the proxy container never mounts the state volume, runs as 10002, and
+	// holds no fleet CA key.
+	if out, err := h.compose("exec", "-T", "caddy", "id", "-u"); err != nil || strings.TrimSpace(string(out)) != "10002" {
+		t.Errorf("caddy runs as uid %q (%v), want 10002", out, err)
+	}
+	if _, err := h.compose("exec", "-T", "caddy", "test", "-e", "/var/lib/fleetguard"); err == nil {
+		t.Error("the proxy container mounts the state directory")
+	}
+}
+
 func TestAgentSurvivesBackendRestart(t *testing.T) {
 	h := getStack(t)
 	id := h.enrolledAgent(t)
@@ -543,14 +585,4 @@ func TestAgentSurvivesBackendRestart(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-}
-
-// tokenOf extracts the --token= value from an install command.
-func tokenOf(cmd string) string {
-	for _, f := range strings.Fields(cmd) {
-		if v, ok := strings.CutPrefix(f, "--token="); ok {
-			return v
-		}
-	}
-	return ""
 }

@@ -9,7 +9,8 @@
 //	FG_PROXY_SECRET         shared secret the proxy adds to every request (required)
 //	FG_LISTEN               listen address, default 127.0.0.1:8080; must be loopback
 //	FG_ALLOW_PUBLIC_LISTEN  set to 1 to allow a non-loopback FG_LISTEN
-//	FG_STATE_DIR            CA and certificate directory, default /var/lib/fleetguard
+//	FG_STATE_DIR            CA directory, default /var/lib/fleetguard; the certificate pair for the
+//	                        proxy goes in its proxy/ subdirectory
 //	FG_AGENT_URL            agent origin on a different host from FG_BASE_URL (required); its host
 //	                        gets the fleet-CA server certificate
 //	FG_BOOTSTRAP_USER, FG_BOOTSTRAP_PASSWORD
@@ -26,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +41,10 @@ import (
 const (
 	defaultListen   = "127.0.0.1:8080"
 	defaultStateDir = "/var/lib/fleetguard"
+	// proxyDirName is the subdirectory of the state directory the reverse proxy
+	// may read: the agent certificate pair and a public copy of ca.crt. ca.key
+	// stays in the state directory itself, readable by the server alone.
+	proxyDirName = "proxy"
 )
 
 type config struct {
@@ -169,12 +175,13 @@ func run(lg *slog.Logger) error {
 	}
 	// The agent pins this CA as its only trust root, so the proxy's certificate
 	// for the agent hostname must come from it, not from ACME.
-	issued, err := authority.EnsureServerCert(cfg.StateDir, cfg.AgentHostname, time.Now())
+	proxyDir := filepath.Join(cfg.StateDir, proxyDirName)
+	issued, err := authority.EnsureServerCert(proxyDir, cfg.AgentHostname, time.Now())
 	if err != nil {
 		return fmt.Errorf("agent server certificate: %w", err)
 	}
 	if issued {
-		lg.Info("issued agent server certificate; restart the reverse proxy to load it", "hostname", cfg.AgentHostname, "dir", cfg.StateDir)
+		lg.Info("issued agent server certificate; restart the reverse proxy to load it", "hostname", cfg.AgentHostname, "dir", proxyDir)
 	} else {
 		lg.Info("agent server certificate is current", "hostname", cfg.AgentHostname)
 	}

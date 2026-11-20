@@ -23,7 +23,7 @@ export default function ServerCard({ server, isAdmin, decommissioning, onDecommi
   const [confirming, setConfirming] = useState(false)
   const reissue = useMutation({
     mutationFn: () =>
-      api<{ install_command: string; token_expires_at: string }>(`/api/servers/${server.id}/enrol-token`, { method: 'POST' }),
+      api<{ install_command: string; token: string; token_expires_at: string }>(`/api/servers/${server.id}/enrol-token`, { method: 'POST' }),
   })
   const cert = certExpiry(server.cert_not_after)
 
@@ -47,7 +47,7 @@ export default function ServerCard({ server, isAdmin, decommissioning, onDecommi
       </dl>
       {isAdmin && reissue.data && (
         <div className="mt-3 border-t pt-3">
-          <InstallCommand command={reissue.data.install_command} expiresAt={reissue.data.token_expires_at} />
+          <InstallCommand command={reissue.data.install_command} token={reissue.data.token} expiresAt={reissue.data.token_expires_at} />
         </div>
       )}
       {isAdmin && reissue.isError && (

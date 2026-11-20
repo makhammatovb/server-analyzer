@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -312,10 +313,10 @@ func TestEnsureServerCertWritesReusesAndRenews(t *testing.T) {
 	if reissued, err := c.EnsureServerCert(dir, "agents.example.test", now); err != nil || !reissued {
 		t.Fatalf("first call = %v, %v; want true, nil", reissued, err)
 	}
-	for _, name := range []string{"agent-server.crt", "agent-server.key"} {
+	for name, want := range map[string]os.FileMode{"agent-server.crt": 0o644, "agent-server.key": 0o640, "ca.crt": 0o644} {
 		fi, err := os.Stat(filepath.Join(dir, name))
-		if err != nil || fi.Mode().Perm() != 0o600 {
-			t.Fatalf("%s: %v, mode %v; want 0600", name, err, fi)
+		if err != nil || fi.Mode().Perm() != want {
+			t.Fatalf("%s: %v, mode %v; want %o", name, err, fi, want)
 		}
 	}
 	crt1, key1 := read()
@@ -375,5 +376,59 @@ func TestEnsureServerCertReissuesWhenTheFilesAreDamaged(t *testing.T) {
 	}
 	if reissued, err := c.EnsureServerCert(dir, "agents.example.test", now); err != nil || !reissued {
 		t.Fatalf("damaged key = %v, %v; want true, nil", reissued, err)
+	}
+}
+
+// The proxy is the process most exposed to the internet. It may read the
+// certificate pair it serves, a public copy of ca.crt and nothing else; above
+// all not ca.key, which signs every agent identity and has no revocation. The
+// deployment gives the proxy's group read access to the proxy directory only,
+// so these modes are the contract: the state directory and ca.key admit the
+// owner alone, and the proxy directory holds no CA private key.
+func TestProxyDirectoryExposesTheCertPairButNotTheCAKey(t *testing.T) {
+	state := t.TempDir()
+	if err := os.Chmod(state, 0o700); err != nil { //nolint:gosec // a directory needs the x bit
+		t.Fatal(err)
+	}
+	c, err := LoadOrCreate(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := filepath.Join(state, "proxy")
+	if _, err := c.EnsureServerCert(proxy, "agents.example.test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	mode := func(path string) os.FileMode {
+		t.Helper()
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Mode().Perm()
+	}
+	if m := mode(state); m&0o077 != 0 {
+		t.Errorf("state directory mode %o admits group or other", m)
+	}
+	if m := mode(filepath.Join(state, "ca.key")); m&0o077 != 0 {
+		t.Errorf("ca.key mode %o admits group or other", m)
+	}
+	if m := mode(proxy); m != 0o750 {
+		t.Errorf("proxy directory mode %o, want 750 (owner rwx, proxy group r-x, others none)", m)
+	}
+	if m := mode(filepath.Join(proxy, "agent-server.key")); m&0o040 == 0 || m&0o007 != 0 || m&0o020 != 0 {
+		t.Errorf("agent-server.key mode %o: the proxy group must read it, nobody else may", m)
+	}
+	entries, err := os.ReadDir(proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == "ca.key" {
+			t.Fatal("the CA private key is in the proxy directory")
+		}
+		b, _ := os.ReadFile(filepath.Join(proxy, e.Name())) //nolint:gosec // test path
+		if e.Name() != "agent-server.key" && strings.Contains(string(b), "PRIVATE KEY") {
+			t.Errorf("%s in the proxy directory holds a private key", e.Name())
+		}
 	}
 }

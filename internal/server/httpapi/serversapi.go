@@ -39,7 +39,11 @@ type fleetDTO struct {
 }
 
 type enrolTokenDTO struct {
-	InstallCommand string    `json:"install_command"`
+	InstallCommand string `json:"install_command"`
+	// Token is shown to the admin beside the command and pasted at the
+	// installer's prompt. It is deliberately not part of the command: a token in
+	// the command is on the argv of sudo and bash, visible to every local user in ps.
+	Token          string    `json:"token"`
 	TokenExpiresAt time.Time `json:"token_expires_at"`
 }
 
@@ -54,9 +58,11 @@ func (a *authAPI) registerServerRoutes(mux *http.ServeMux, requireUser func(http
 
 // installCommand renders the one-liner an admin runs on the new server. The
 // installer is fetched from the dashboard origin, but the agent is pointed at
-// the agent origin, whose certificate it can verify. The token is base64url, so it needs no shell quoting.
-func (a *authAPI) installCommand(token string) string {
-	return fmt.Sprintf("curl -sSL %s/install.sh | sudo bash -s -- --token=%s --server-url=%s", a.origin, token, a.agentOrigin)
+// the agent origin, whose certificate it can verify. The command carries no
+// token: the installer prompts for it on the terminal, which keeps it out of
+// argv, the environment, shell history and disk.
+func (a *authAPI) installCommand() string {
+	return fmt.Sprintf("curl -sSL %s/install.sh | sudo bash -s -- --server-url=%s", a.origin, a.agentOrigin)
 }
 
 // issueToken mints a single-use token for serverID and audits that it was
@@ -70,7 +76,7 @@ func (a *authAPI) issueToken(r *http.Request, actorID, serverID string) (enrolTo
 	if err := a.st.AppendAudit(r.Context(), actorID, "server.enrol_token_issued", serverID, nil); err != nil {
 		a.lg.Error("httpapi: audit append failed", "action", "server.enrol_token_issued", "err", err)
 	}
-	return enrolTokenDTO{InstallCommand: a.installCommand(token), TokenExpiresAt: now.Add(enrolTokenTTL)}, nil
+	return enrolTokenDTO{InstallCommand: a.installCommand(), Token: token, TokenExpiresAt: now.Add(enrolTokenTTL)}, nil
 }
 
 func noStore(w http.ResponseWriter) { w.Header().Set("Cache-Control", "no-store") }

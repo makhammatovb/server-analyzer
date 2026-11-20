@@ -66,10 +66,11 @@
 		file_server
 	}
 
-	# The fleet CA certificate, the agent's whole root of trust. Only this one
-	# path is mapped, so ca.key beside it in the state directory is unreachable.
+	# The fleet CA certificate (the public copy the server writes), the agent's
+	# whole root of trust. Caddy has no access to ca.key at all: it mounts only
+	# the proxy directory.
 	handle /ca.crt {
-		root * /var/lib/fleetguard
+		root * /proxy-certs
 		file_server
 	}
 
@@ -83,7 +84,7 @@
 {$FG_AGENT_URL} {
 	# Issued by the fleet CA, written by the server binary at start. Caddy reads
 	# it at (re)load only: after a reissue run "caddy reload" (see the README).
-	tls /var/lib/fleetguard/agent-server.crt /var/lib/fleetguard/agent-server.key {
+	tls /proxy-certs/agent-server.crt /proxy-certs/agent-server.key {
 		# verify_if_given, not require_and_verify: an agent enrolling for the
 		# first time has no certificate, and one whose certificate expired while
 		# its host was off must re-enrol without one. A certificate that IS
@@ -92,7 +93,7 @@
 		# re-enrol are authenticated by token and enrolment secret).
 		client_auth {
 			mode verify_if_given
-			trust_pool file /var/lib/fleetguard/ca.crt
+			trust_pool file /proxy-certs/ca.crt
 		}
 	}
 

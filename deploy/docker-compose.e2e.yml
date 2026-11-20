@@ -15,6 +15,7 @@ services:
       dockerfile: Dockerfile.agent-test
     environment:
       FG_INSTALL_COMMAND: ${FG_INSTALL_COMMAND:-}
+      FG_TEST_TOKEN: ${FG_TEST_TOKEN:-}
     volumes:
       # Caddy's local CA root, so the "host" trusts the dashboard certificate.
       - caddydata:/caddy/data:ro

@@ -257,6 +257,9 @@ const (
 	// ServerCertRenewBefore is how close to expiry a certificate is replaced.
 	ServerCertRenewBefore = 60 * 24 * time.Hour
 
+	// proxyCAFile is the public copy of the CA certificate the proxy reads.
+	proxyCAFile = "ca.crt"
+
 	serverCertFile = "agent-server.crt"
 	serverKeyFile  = "agent-server.key"
 )
@@ -301,11 +304,25 @@ func (c *CA) IssueServerCert(dnsName string, ttl time.Duration, now time.Time) (
 }
 
 // EnsureServerCert makes sure dir holds a usable agent-server.crt and
-// agent-server.key for dnsName, and reports whether it (re)issued them. Existing
-// files are kept only if the pair loads, the certificate chains to this CA for
-// server authentication, names dnsName, and has more than ServerCertRenewBefore
-// left; anything else, including unreadable or damaged files, is replaced.
+// agent-server.key for dnsName, plus a public copy of ca.crt, and reports whether
+// it (re)issued the pair. Existing files are kept only if the pair loads, the
+// certificate chains to this CA for server authentication, names dnsName, and
+// has more than ServerCertRenewBefore left; anything else, including unreadable
+// or damaged files, is replaced.
+//
+// dir is the proxy's directory, not the CA's: the reverse proxy is the process
+// most exposed to the internet, so it must be able to read this pair and
+// nothing else. Callers therefore pass a subdirectory distinct from the one
+// holding ca.key. The directory is created 0750 and the key 0640, so a proxy
+// sharing the directory's group can read it and no one else can; the
+// certificate and the CA copy are public (0644).
 func (c *CA) EnsureServerCert(dir, dnsName string, now time.Time) (bool, error) {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return false, fmt.Errorf("ca: create dir: %w", err)
+	}
+	if err := writeReplace(filepath.Join(dir, proxyCAFile), c.certPEM, 0o644); err != nil {
+		return false, err
+	}
 	if c.serverCertUsable(dir, dnsName, now) {
 		return false, nil
 	}
@@ -313,15 +330,12 @@ func (c *CA) EnsureServerCert(dir, dnsName string, now time.Time) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return false, fmt.Errorf("ca: create dir: %w", err)
-	}
 	// Key first: a crash between the two writes leaves a mismatched pair, which
 	// serverCertUsable rejects, so the next start repairs it.
-	if err := writeReplace(filepath.Join(dir, serverKeyFile), keyPEM); err != nil {
+	if err := writeReplace(filepath.Join(dir, serverKeyFile), keyPEM, 0o640); err != nil {
 		return false, err
 	}
-	if err := writeReplace(filepath.Join(dir, serverCertFile), certPEM); err != nil {
+	if err := writeReplace(filepath.Join(dir, serverCertFile), certPEM, 0o644); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -355,15 +369,20 @@ func (c *CA) serverCertUsable(dir, dnsName string, now time.Time) bool {
 	return cert.NotAfter.Sub(now) > ServerCertRenewBefore
 }
 
-// writeReplace writes data to path with mode 0600 via a temporary file and a
-// rename, so a reader never sees a half-written file.
-func writeReplace(path string, data []byte) error {
+// writeReplace writes data to path with the given mode via a temporary file and
+// a rename, so a reader never sees a half-written file. The mode is applied
+// explicitly: the file's group comes from the directory (setgid in the
+// deployment), not from the process.
+func writeReplace(path string, data []byte, mode os.FileMode) error {
 	tmp := path + ".tmp"
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("ca: clear %s: %w", filepath.Base(tmp), err)
 	}
 	if err := writeExclusive(tmp, data); err != nil {
 		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		return fmt.Errorf("ca: chmod %s: %w", filepath.Base(tmp), err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("ca: replace %s: %w", filepath.Base(path), err)

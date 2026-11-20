@@ -15,9 +15,12 @@ set -eu
 # real host trusts a public CA.
 cp /caddy/data/caddy/pki/authorities/local/root.crt /usr/local/share/ca-certificates/caddy-local.crt
 update-ca-certificates >/dev/null
-# FG_INSTALL_COMMAND is the install_command the API returned, verbatim.
-sh -c "$FG_INSTALL_COMMAND"
-unset FG_INSTALL_COMMAND
+# FG_INSTALL_COMMAND is the install_command the API returned, verbatim. It
+# carries no token, so the installer prompts on /dev/tty. A container has no
+# terminal, so script(1) gives the command a pty and the token is typed into it
+# from this container's environment, as an admin would paste it.
+printf '%s\n' "$FG_TEST_TOKEN" | script -qec "$FG_INSTALL_COMMAND" /dev/null
+unset FG_INSTALL_COMMAND FG_TEST_TOKEN
 exec /usr/local/bin/fleetguard-agent run --config=/etc/fleetguard/agent.yaml
 SH
 RUN chmod 0755 /usr/local/bin/agent-test-entrypoint

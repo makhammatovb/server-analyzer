@@ -39,7 +39,9 @@ services:
       FG_CADDY_GLOBAL: ${FG_CADDY_GLOBAL:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - fgstate:/var/lib/fleetguard
+      # Only the proxy directory: the certificate pair and a public ca.crt.
+      # Never the state volume, which holds ca.key.
+      - fgproxy:/proxy-certs:ro
       - caddydata:/caddy/data
       - ../web/dist:/srv/dashboard:ro
       - ./install.sh:/srv/site/install.sh:ro
@@ -68,8 +70,12 @@ services:
       FG_BOOTSTRAP_PASSWORD: ${FG_BOOTSTRAP_PASSWORD:-}
     volumes:
       - fgstate:/var/lib/fleetguard
+      # Nested over fgstate's proxy/ subdirectory: what the server writes there
+      # is what Caddy reads, and nothing else is shared.
+      - fgproxy:/var/lib/fleetguard/proxy
 
 volumes:
   dbdata:
   fgstate:
+  fgproxy:
   caddydata:

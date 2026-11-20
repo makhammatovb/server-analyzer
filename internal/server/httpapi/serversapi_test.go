@@ -58,6 +58,7 @@ type createdServer struct {
 		Note string `json:"note"`
 	} `json:"server"`
 	InstallCommand string    `json:"install_command"`
+	Token          string    `json:"token"`
 	TokenExpiresAt time.Time `json:"token_expires_at"`
 }
 
@@ -73,16 +74,6 @@ func (e *fleetEnv) createServer(t *testing.T, cookie string) createdServer {
 		t.Fatalf("decode: %v", err)
 	}
 	return out
-}
-
-func tokenFromCommand(t *testing.T, cmd string) string {
-	t.Helper()
-	_, rest, ok := strings.Cut(cmd, "--token=")
-	if !ok {
-		t.Fatalf("no --token= in %q", cmd)
-	}
-	tok, _, _ := strings.Cut(rest, " ")
-	return tok
 }
 
 type fleetRow struct {
@@ -141,10 +132,17 @@ func TestCreateServerReturnsInstallCommandWithToken(t *testing.T) {
 	e := newFleetEnv(t)
 	out := e.createServer(t, e.adminCookie(t))
 
-	token := tokenFromCommand(t, out.InstallCommand)
-	want := "curl -sSL " + baseURL + "/install.sh | sudo bash -s -- --token=" + token + " --server-url=" + agentURL
+	token := out.Token
+	if token == "" {
+		t.Fatal("no token returned")
+	}
+	// The token is on no command line: argv is visible to every local user.
+	want := "curl -sSL " + baseURL + "/install.sh | sudo bash -s -- --server-url=" + agentURL
 	if out.InstallCommand != want {
 		t.Fatalf("install_command = %q\nwant %q", out.InstallCommand, want)
+	}
+	if strings.Contains(out.InstallCommand, token) || strings.Contains(out.InstallCommand, "--token") {
+		t.Fatalf("install_command carries the token: %q", out.InstallCommand)
 	}
 	id, err := e.st.ConsumeEnrolToken(context.Background(), token, time.Now())
 	if err != nil || id != out.Server.ID {
@@ -158,7 +156,7 @@ func TestCreateServerReturnsInstallCommandWithToken(t *testing.T) {
 func TestCreateServerAuditsWithoutTheToken(t *testing.T) {
 	e := newFleetEnv(t)
 	out := e.createServer(t, e.adminCookie(t))
-	token := tokenFromCommand(t, out.InstallCommand)
+	token := out.Token
 
 	var n int
 	err := e.st.Pool().QueryRow(context.Background(),
@@ -227,7 +225,7 @@ func TestFleetListReportsOnlineFlag(t *testing.T) {
 	e := newFleetEnv(t)
 	cookie := e.adminCookie(t)
 	created := e.createServer(t, cookie)
-	der := e.enrolOver(t, tokenFromCommand(t, created.InstallCommand))
+	der := e.enrolOver(t, created.Token)
 	if row := findRow(e.fleet(t, cookie), created.Server.ID); row == nil || row.Online {
 		t.Fatalf("before heartbeat: %+v, want present and offline", row)
 	}
@@ -265,7 +263,7 @@ func TestEnrolTokenCanBeReissued(t *testing.T) {
 	e := newFleetEnv(t)
 	cookie := e.adminCookie(t)
 	created := e.createServer(t, cookie)
-	first := tokenFromCommand(t, created.InstallCommand)
+	first := created.Token
 
 	w := e.do("POST", "/api/servers/"+created.Server.ID+"/enrol-token", "", cookie, "")
 	if w.Code != http.StatusOK {
@@ -273,12 +271,13 @@ func TestEnrolTokenCanBeReissued(t *testing.T) {
 	}
 	var re struct {
 		InstallCommand string    `json:"install_command"`
+		Token          string    `json:"token"`
 		TokenExpiresAt time.Time `json:"token_expires_at"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &re); err != nil {
 		t.Fatal(err)
 	}
-	second := tokenFromCommand(t, re.InstallCommand)
+	second := re.Token
 	if second == first {
 		t.Fatal("reissue returned the same token")
 	}
@@ -311,19 +310,19 @@ func TestDecommissionBlocksFurtherHeartbeats(t *testing.T) {
 	e := newFleetEnv(t)
 	cookie := e.adminCookie(t)
 	created := e.createServer(t, cookie)
-	der := e.enrolOver(t, tokenFromCommand(t, created.InstallCommand))
+	der := e.enrolOver(t, created.Token)
 	if resp := heartbeat(t, e.agent.URL, hbBody(created.Server.ID, "boot-1"), der, true); resp.StatusCode != http.StatusOK {
 		t.Fatalf("pre-decommission heartbeat = %d, want 200", resp.StatusCode)
 	}
 	// An unspent token for the same server must die with it.
-	pending := tokenFromCommand(t, func() string {
+	pending := func() string {
 		w := e.do("POST", "/api/servers/"+created.Server.ID+"/enrol-token", "", cookie, "")
 		var re struct {
-			InstallCommand string `json:"install_command"`
+			Token string `json:"token"`
 		}
 		_ = json.Unmarshal(w.Body.Bytes(), &re)
-		return re.InstallCommand
-	}())
+		return re.Token
+	}()
 
 	if w := e.do("POST", "/api/servers/"+created.Server.ID+"/decommission", "", cookie, ""); w.Code != http.StatusNoContent {
 		t.Fatalf("decommission = %d %s, want 204", w.Code, w.Body)
@@ -389,7 +388,7 @@ func TestDecommissionBeforeEnrolmentStillRevokesTheToken(t *testing.T) {
 	if w := e.do("POST", "/api/servers/"+created.Server.ID+"/decommission", "", cookie, ""); w.Code != http.StatusNoContent {
 		t.Fatalf("decommission = %d, want 204", w.Code)
 	}
-	if _, err := e.st.ConsumeEnrolToken(context.Background(), tokenFromCommand(t, created.InstallCommand), time.Now()); err == nil {
+	if _, err := e.st.ConsumeEnrolToken(context.Background(), created.Token, time.Now()); err == nil {
 		t.Fatal("token redeemable for a decommissioned server")
 	}
 }

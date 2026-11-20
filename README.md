@@ -13,7 +13,7 @@ announcing their own intrusion.
 Does:
 
 - An admin signs in to the dashboard, adds a server and gets a one-line install
-  command containing a single-use token (valid for one hour).
+  command and a separate single-use token (valid for one hour).
 - The installer enrols the agent over mutual TLS against a CA the central app
   runs itself. The agent keeps a short-lived certificate and renews it.
 - The agent sends a heartbeat every 30 seconds. The fleet list shows each server
@@ -39,10 +39,12 @@ Set `FG_BOOTSTRAP_USER` / `FG_BOOTSTRAP_PASSWORD` for the first start to create
 the first administrator, then remove the password from `.env`.
 
 Open the dashboard origin, sign in, **Add server**, and run the command it
-prints as root on the new host:
+prints as root on the new host, in an interactive shell. The installer then asks
+you to paste the enrolment token shown beside the command:
 
 ```sh
-curl -sSL https://fleet.example.com/install.sh | sudo bash -s -- --token=<token> --server-url=https://agents.example.com
+curl -sSL https://fleet.example.com/install.sh | sudo bash -s -- --server-url=https://agents.example.com
+Paste the enrolment token and press Enter:
 ```
 
 The host appears in the fleet list as online within a minute. Running the
@@ -86,18 +88,25 @@ agent ───443──► Caddy  agent host: the fleet-CA certificate; proxies
   joins it, so the backend is on Caddy's `127.0.0.1` and unreachable from
   anywhere else. Caddy owns the namespace (not the server) so that restarting the
   server does not strand Caddy.
-- **Caddy reads `agent-server.key`**, which the server writes mode 0600 in a 0700
-  directory. Both images run as uid 10001 and share one state volume. The cost:
-  Caddy can also read `ca.key` in that volume. Only `/ca.crt` is mapped to a
-  file, but a Caddy compromise would expose the CA key. Splitting the CA key
-  into a separate volume needs a server change and is future work.
+- **Caddy cannot read the CA key.** The server (uid 10001) keeps `ca.key` (0600)
+  in a 0700 state directory. It writes the proxy's files, `agent-server.crt`,
+  `agent-server.key` (0640) and a public copy of `ca.crt`, to a `proxy/`
+  subdirectory of the state directory: 2750, owner 10001, group 10002. Caddy runs
+  as uid/gid 10002, a different user, in a container that mounts only that
+  subdirectory (its own volume, read-only, at `/proxy-certs`) and never the state
+  volume. It reads the key through the group and can reach nothing else, so a
+  compromise of the internet-facing proxy cannot mint agent certificates. The
+  end-to-end test asserts this (uid 10002 cannot read or list `ca.key`).
 - **The agent's root of trust is one fetch.** `install.sh` fetches `ca.crt` from
   the dashboard host over publicly trusted TLS into the state directory
   (root, 0600) before enrolling. The agent treats a missing `ca.crt` as a hard
-  error. The token reaches the agent in its environment (`FG_ENROL_TOKEN`),
-  never on its command line, and is not written to disk. (The pasted command
-  itself carries it for the length of the install; it is single-use and expires
-  in an hour.)
+  error. The enrolment token is not in the command: the installer prompts for it on
+  the terminal (`/dev/tty`, input hidden), so it is never in argv (visible to
+  every local user in `ps`), the environment of a long-lived process, shell
+  history or on disk, and it reaches the agent only in the agent's environment
+  for the enrol call. Automation may set `FG_ENROL_TOKEN` instead (with `sudo
+  --preserve-env=FG_ENROL_TOKEN`, since `env_reset` strips it otherwise) or pass
+  `--token=`, knowingly accepting that argv or the environment is then readable.
 
 ### Restart cadence: the agent certificate
 
@@ -158,6 +167,20 @@ heartbeating), sampled each minute with `docker stats --no-stream` and from
 
 Phase 0 only sends heartbeats, so this is a floor: Phases 1 and 2 add collection
 and must be re-measured against the same budget.
+
+## What Phase 0 has not exercised
+
+Be aware of what the tests above do not cover:
+
+- **A real systemd host.** The end-to-end "host" is a container with no systemd,
+  so the installer's unit installation, `enable` and `restart` path and the unit
+  file itself (including `Restart=always`) have not been run.
+- **Real ACME issuance.** The tests use Caddy's `local_certs`; a public
+  certificate for the dashboard host has not been obtained.
+- **amd64.** Only linux/arm64 was run, although `make dist` builds both.
+- **Certificate reissue and reload.** The server certificate is reissued only
+  when fewer than 60 days remain at start-up, and Caddy then needs a reload; that
+  flow has not been run (only first issuance).
 
 ## Deliberate deviation from the design: installer integrity
 
