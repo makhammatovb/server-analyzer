@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+FROM caddy:2.10-alpine
+# Same uid as Dockerfile.server: Caddy reads agent-server.key, which the server
+# writes mode 0600 in a 0700 directory. Both mount the "fgstate" volume, whose
+# ownership comes from this directory on first use.
+RUN addgroup -g 10001 fleetguard && adduser -D -u 10001 -G fleetguard fleetguard \
+ && install -d -m 0700 -o fleetguard -g fleetguard /var/lib/fleetguard \
+ && install -d -m 0700 -o fleetguard -g fleetguard /caddy/data /caddy/config
+# Caddy cannot load the agent certificate before the server has issued it, and
+# the server starts after Caddy (it shares Caddy's network namespace), so wait.
+COPY <<'SH' /usr/local/bin/caddy-when-ready
+#!/bin/sh
+d=/var/lib/fleetguard
+until [ -s "$d/agent-server.crt" ] && [ -s "$d/agent-server.key" ] && [ -s "$d/ca.crt" ]; do
+  echo "waiting for the server to issue the agent certificate in $d" >&2
+  sleep 1
+done
+exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+SH
+RUN chmod 0755 /usr/local/bin/caddy-when-ready
+USER 10001:10001
+ENV XDG_DATA_HOME=/caddy/data XDG_CONFIG_HOME=/caddy/config
+CMD ["/usr/local/bin/caddy-when-ready"]

@@ -16,3 +16,6 @@ web/dist/
 
 # macOS
 .DS_Store
+
+# generated installer downloads
+deploy/site/

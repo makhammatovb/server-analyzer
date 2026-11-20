@@ -21,7 +21,12 @@ import (
 	"github.com/makhammatovb/fleetguard/internal/agent"
 )
 
-const defaultConfigPath = "/etc/fleetguard/agent.yaml"
+const (
+	defaultConfigPath = "/etc/fleetguard/agent.yaml"
+	// tokenEnv carries the enrolment token without putting it on the command
+	// line, where any local user could read it from ps.
+	tokenEnv = "FG_ENROL_TOKEN" //nolint:gosec // the name of an environment variable, not a credential
+)
 
 func main() {
 	os.Exit(realMain(os.Args[1:], os.Stderr))
@@ -58,7 +63,7 @@ func realMain(args []string, errw io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	_, _ = fmt.Fprintln(w, "usage: fleetguard-agent enrol --token=<token> [--config=<path>]\n       fleetguard-agent run [--config=<path>]")
+	_, _ = fmt.Fprintln(w, "usage: FG_ENROL_TOKEN=<token> fleetguard-agent enrol [--config=<path>]\n       fleetguard-agent run [--config=<path>]")
 }
 
 func loadConfig(fs *flag.FlagSet, args []string) (agent.Config, error) {
@@ -78,13 +83,16 @@ func loadConfig(fs *flag.FlagSet, args []string) (agent.Config, error) {
 func enrolCmd(args []string, errw io.Writer) error {
 	fs := flag.NewFlagSet("enrol", flag.ContinueOnError)
 	fs.SetOutput(errw)
-	token := fs.String("token", "", "one-time enrolment token from the server")
+	token := fs.String("token", "", "one-time enrolment token; prefer the "+tokenEnv+" environment variable, since argv is visible to every local user in ps")
 	cfg, err := loadConfig(fs, args)
 	if err != nil {
 		return err
 	}
 	if *token == "" {
-		return errors.New("enrol: --token is required")
+		*token = os.Getenv(tokenEnv)
+	}
+	if *token == "" {
+		return errors.New("enrol: a token is required: set " + tokenEnv + " (or pass --token)")
 	}
 	host, err := os.Hostname()
 	if err != nil {

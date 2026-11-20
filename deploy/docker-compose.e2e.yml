@@ -1,0 +1,22 @@
+# Overlay for the end-to-end test (test/e2e): both hostnames resolve to Caddy on
+# the compose network, and a container stands in for a customer's Linux host.
+services:
+  caddy:
+    networks:
+      default:
+        aliases:
+          - fleet.test
+          - agents.fleet.test
+
+  agent:
+    profiles: ["agent"]
+    build:
+      context: .
+      dockerfile: Dockerfile.agent-test
+    environment:
+      FG_INSTALL_COMMAND: ${FG_INSTALL_COMMAND:-}
+    volumes:
+      # Caddy's local CA root, so the "host" trusts the dashboard certificate.
+      - caddydata:/caddy/data:ro
+    depends_on:
+      - caddy

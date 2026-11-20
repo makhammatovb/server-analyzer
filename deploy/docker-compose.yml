@@ -1,9 +1,16 @@
-# Database service only; the remaining services are added in Task 12.
-# The image tag must match store.TimescaleImage in
+# The FleetGuard stack: database, reverse proxy and server.
+#
+# Caddy owns the network namespace and the server joins it (network_mode), so
+# the backend listens on 127.0.0.1:8080 inside Caddy's namespace and nothing
+# else can reach it. Caddy owns the namespace, not the server, so that
+# restarting the server does not strand Caddy. Only 443 is published.
+#
+# The db image tag must match store.TimescaleImage in
 # internal/server/store/store.go.
 services:
   db:
     image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: fleetguard
       POSTGRES_PASSWORD: ${FG_DB_PASSWORD:?set FG_DB_PASSWORD}
@@ -16,5 +23,53 @@ services:
       timeout: 3s
       retries: 10
 
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    restart: unless-stopped
+    # The only public listener. FG_HTTPS_PUBLISH exists for the end-to-end
+    # test, which publishes on a random loopback port.
+    ports:
+      - "${FG_HTTPS_PUBLISH:-443:443}"
+    environment:
+      FG_BASE_URL: ${FG_BASE_URL:?set FG_BASE_URL}
+      FG_AGENT_URL: ${FG_AGENT_URL:?set FG_AGENT_URL}
+      FG_PROXY_SECRET: ${FG_PROXY_SECRET:?set FG_PROXY_SECRET}
+      FG_CADDY_GLOBAL: ${FG_CADDY_GLOBAL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - fgstate:/var/lib/fleetguard
+      - caddydata:/caddy/data
+      - ../web/dist:/srv/dashboard:ro
+      - ./install.sh:/srv/site/install.sh:ro
+      - ./fleetguard-agent.service:/srv/site/fleetguard-agent.service:ro
+      - ./site/downloads:/srv/site/downloads:ro
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    network_mode: "service:caddy"
+    depends_on:
+      db:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+    environment:
+      # FG_DB_PASSWORD is interpolated into a URL: use letters and digits
+      # (openssl rand -hex 24).
+      FG_DSN: postgres://fleetguard:${FG_DB_PASSWORD:?set FG_DB_PASSWORD}@db:5432/fleetguard?sslmode=disable
+      FG_BASE_URL: ${FG_BASE_URL:?set FG_BASE_URL}
+      FG_AGENT_URL: ${FG_AGENT_URL:?set FG_AGENT_URL}
+      FG_PROXY_SECRET: ${FG_PROXY_SECRET:?set FG_PROXY_SECRET}
+      FG_BOOTSTRAP_USER: ${FG_BOOTSTRAP_USER:-}
+      FG_BOOTSTRAP_PASSWORD: ${FG_BOOTSTRAP_PASSWORD:-}
+    volumes:
+      - fgstate:/var/lib/fleetguard
+
 volumes:
   dbdata:
+  fgstate:
+  caddydata:

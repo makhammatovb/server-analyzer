@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/fleetguard-server ./cmd/server
+
+FROM alpine:3.21
+# uid 10001 is shared with the Caddy image (Dockerfile.caddy) on purpose: the
+# server writes agent-server.key mode 0600 in a 0700 directory, and Caddy must
+# read it, so both run as the same user.
+RUN addgroup -g 10001 fleetguard && adduser -D -u 10001 -G fleetguard fleetguard \
+ && install -d -m 0700 -o fleetguard -g fleetguard /var/lib/fleetguard
+COPY --from=build /out/fleetguard-server /usr/local/bin/fleetguard-server
+USER 10001:10001
+ENV FG_STATE_DIR=/var/lib/fleetguard
+ENTRYPOINT ["/usr/local/bin/fleetguard-server"]

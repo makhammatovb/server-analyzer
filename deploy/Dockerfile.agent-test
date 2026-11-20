@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# A stand-in for a customer's Linux host, used only by the end-to-end test. It
+# runs the REAL installer from the dashboard origin. There is no systemd in a
+# container, so the installer installs the unit and skips starting it, and the
+# entrypoint then runs the agent the unit would have run.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates sudo \
+ && rm -rf /var/lib/apt/lists/*
+COPY <<'SH' /usr/local/bin/agent-test-entrypoint
+#!/bin/sh
+set -eu
+# The dashboard origin presents a browser-trusted certificate. Under test that
+# is Caddy's local CA, which this host's system store must trust, exactly as a
+# real host trusts a public CA.
+cp /caddy/data/caddy/pki/authorities/local/root.crt /usr/local/share/ca-certificates/caddy-local.crt
+update-ca-certificates >/dev/null
+# FG_INSTALL_COMMAND is the install_command the API returned, verbatim.
+sh -c "$FG_INSTALL_COMMAND"
+unset FG_INSTALL_COMMAND
+exec /usr/local/bin/fleetguard-agent run --config=/etc/fleetguard/agent.yaml
+SH
+RUN chmod 0755 /usr/local/bin/agent-test-entrypoint
+ENTRYPOINT ["/usr/local/bin/agent-test-entrypoint"]

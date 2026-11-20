@@ -45,3 +45,22 @@ func TestRealMainExitCodes(t *testing.T) {
 		})
 	}
 }
+
+// The token must be passable without argv, which any local user can read in ps.
+func TestEnrolTakesTheTokenFromTheEnvironment(t *testing.T) {
+	cfg := config(t)
+	state := t.TempDir() // no ca.crt: enrolment gets as far as the pin and stops
+	args := []string{"enrol", "--config=" + cfg, "--state-dir=" + state}
+
+	t.Setenv("FG_ENROL_TOKEN", "")
+	var errw bytes.Buffer
+	if got := realMain(args, &errw); got != 1 || !strings.Contains(errw.String(), "token is required") {
+		t.Fatalf("no token anywhere: exit %d, %q", got, errw.String())
+	}
+
+	t.Setenv("FG_ENROL_TOKEN", "from-env")
+	errw.Reset()
+	if got := realMain(args, &errw); got != 1 || strings.Contains(errw.String(), "token is required") || !strings.Contains(errw.String(), "ca.crt") {
+		t.Fatalf("token in the environment was not used: exit %d, %q", got, errw.String())
+	}
+}
